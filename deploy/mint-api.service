@@ -1,0 +1,22 @@
+[Unit]
+Description=MINT Backend API (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/MINT_Backend
+
+# App loads .env from WorkingDirectory (pydantic-settings). Do not use /usr/bin/uvicorn.
+ExecStart=/home/ubuntu/MINT_Backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8100
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mint-api
+
+[Install]
+WantedBy=multi-user.target

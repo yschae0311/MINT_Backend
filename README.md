@@ -32,32 +32,25 @@ The DB user must be allowed to `CREATE TABLE` on schema `public`. If `alembic up
 
 ## AWS / EC2 (production)
 
-**Do not** use system `uvicorn` (`/usr/lib/python3/dist-packages`). Use a project venv.
+**Do not** use system `uvicorn` (`/usr/bin/uvicorn`). Use venv + systemd.
 
 ```bash
-# Ubuntu: install Python 3.12 (avoid 3.14 — dependency issues)
 sudo apt update
 sudo apt install -y python3.12 python3.12-venv
 
 cd MINT_Backend
-cp .env.example .env   # edit DATABASE_URL, REDIS_URL, GEMINI_API_KEY, JWT_SECRET_KEY
+cp .env.example .env   # edit DATABASE_URL, REDIS_URL, GEMINI_API_KEY, JWT_SECRET_KEY, CORS_ORIGINS
+PYTHON=python3.12 ./scripts/setup.sh
 
-chmod +x scripts/setup.sh scripts/start-api.sh
-./scripts/setup.sh
-./scripts/start-api.sh          # http://0.0.0.0:8100
+chmod +x deploy/install-systemd.sh
+./deploy/install-systemd.sh
+sudo systemctl start mint-api
+sudo systemctl start mint-celery-worker mint-celery-beat   # optional: needs Redis
 ```
 
-Manual equivalent:
+Details: [`deploy/README.md`](deploy/README.md)
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pip install --no-deps .
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8100
-```
-
-Verify: `curl http://localhost:8100/api/v1/health`
+Foreground test: `./run.sh` — Verify: `curl http://localhost:8100/api/v1/health`
 
 ## Celery worker
 

@@ -39,6 +39,14 @@ pip install --upgrade pip
 pip install -r requirements.txt
 pip install --no-deps .
 
+if ! .venv/bin/python -c "import fastapi" 2>/dev/null; then
+  echo "ERROR: fastapi not installed in .venv"
+  exit 1
+fi
+
 echo ""
-echo "Done. Activate with: source .venv/bin/activate"
-echo "Run API:           ./scripts/start-api.sh"
+echo "Done."
+echo "  Run API:  ./run.sh"
+echo "  Or:       source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8100"
+echo ""
+echo "Do NOT use: uvicorn ...  (that is /usr/bin/uvicorn without fastapi)"
