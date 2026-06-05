@@ -9,7 +9,7 @@ cd MINT_Backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .                    # local dev
-# pip install -r requirements.txt && pip install --no-deps .   # production / AWS
+# pip install -r requirements.txt && pip install --no-deps .   # production / AWS (Python 3.11+)
 cp .env.example .env   # default: SQLite ./mint_dev.db
 uvicorn app.main:app --reload --port 8100
 ```
