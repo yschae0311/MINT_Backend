@@ -1,7 +1,7 @@
 [Unit]
 Description=MINT Celery Worker
-After=network-online.target mint-api.service
-Wants=network-online.target
+After=network-online.target redis-server.service mint-api.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple
