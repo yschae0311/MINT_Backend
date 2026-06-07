@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from datetime import date
 from uuid import UUID
 
 import httpx
@@ -62,6 +63,16 @@ class SlackService:
         webhook = self._active_webhook(organization_id, SlackPurpose.all)
         ok, err = self._post_message(webhook, message)
         self._log(organization_id, webhook.channel_name, message, ok, err)
+        return SlackTestResponse(success=ok, message=err or "Sent successfully")
+
+    def send_no_changes(self, organization_id: UUID, report_date: date) -> SlackTestResponse:
+        webhook = self._active_webhook(organization_id, SlackPurpose.daily)
+        text = (
+            f"*MINT 일일 리포트 ({report_date.isoformat()})*\n"
+            "모니터링 대상 소스를 확인했으나, 오늘은 새로운 변화가 없습니다."
+        )
+        ok, err = self._post_message(webhook, text)
+        self._log(organization_id, webhook.channel_name, text, ok, err)
         return SlackTestResponse(success=ok, message=err or "Sent successfully")
 
     def send_report(self, report_id: UUID, organization_id: UUID) -> SlackTestResponse:

@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
 
-def _kst_yesterday() -> date:
-    return datetime.now(KST).date() - timedelta(days=1)
+def _kst_today() -> date:
+    return datetime.now(KST).date()
 
 
 @celery_app.task(name="app.workers.tasks.crawl_all_sources_task")
@@ -90,11 +90,11 @@ def summarize_post_task(post_id: str, organization_id: str):
 def generate_daily_report_task(report_date: str | None = None):
     db = SessionLocal()
     try:
-        target = date.fromisoformat(report_date) if report_date else _kst_yesterday()
+        target = date.fromisoformat(report_date) if report_date else _kst_today()
         logger.info("generate_daily_report target=%s", target)
         for org in db.scalars(select(Organization)).all():
             try:
-                report = ReportService(db).generate(org.id, target)
+                report = ReportService(db).generate(org.id, target, allow_empty=True)
                 logger.info(
                     "generate_daily_report org=%s report_id=%s date=%s",
                     org.id,
@@ -121,24 +121,31 @@ def send_daily_report_to_slack_task(report_date: str | None = None):
 
     db = SessionLocal()
     try:
-        target = date.fromisoformat(report_date) if report_date else _kst_yesterday()
+        target = date.fromisoformat(report_date) if report_date else _kst_today()
         reports = db.scalars(select(DailyReport).where(DailyReport.report_date == target)).all()
-        if not reports:
-            logger.warning("send_daily_report_to_slack no reports for date=%s", target)
-            return
-        for report in reports:
+        reports_by_org = {r.organization_id: r for r in reports}
+
+        for org in db.scalars(select(Organization)).all():
             try:
-                result = SlackService(db).send_report(report.id, report.organization_id)
+                report = reports_by_org.get(org.id)
+                if report:
+                    result = SlackService(db).send_report(report.id, org.id)
+                else:
+                    result = SlackService(db).send_no_changes(org.id, target)
                 if result.success:
-                    logger.info("send_daily_report_to_slack report=%s sent", report.id)
+                    logger.info(
+                        "send_daily_report_to_slack org=%s sent (%s)",
+                        org.id,
+                        "report" if report else "no-changes",
+                    )
                 else:
                     logger.warning(
-                        "send_daily_report_to_slack report=%s failed: %s",
-                        report.id,
+                        "send_daily_report_to_slack org=%s failed: %s",
+                        org.id,
                         result.message,
                     )
             except Exception as exc:
-                logger.warning("send_daily_report_to_slack report=%s failed: %s", report.id, exc)
+                logger.warning("send_daily_report_to_slack org=%s failed: %s", org.id, exc)
     finally:
         db.close()
 

@@ -76,6 +76,7 @@ class ReportService:
         report_date: date | None = None,
         *,
         prefer_yesterday: bool = False,
+        allow_empty: bool = False,
     ) -> DailyReportDetail:
         target = self._resolve_report_date(report_date, prefer_yesterday=prefer_yesterday)
         start, end = self._day_range(target)
@@ -99,10 +100,12 @@ class ReportService:
             or (p.board_type == BoardType.discovery and p.status == PostStatus.pending)
         ]
         if not eligible:
-            raise BadRequestError(
-                f"{target.isoformat()} 기준으로 리포트에 포함할 게시글이 없습니다. "
-                "해당 날짜에 수집된 중요/AI 발견 게시글이 있는지 확인하세요."
-            )
+            if not allow_empty:
+                raise BadRequestError(
+                    f"{target.isoformat()} 기준으로 리포트에 포함할 게시글이 없습니다. "
+                    "해당 날짜에 수집된 중요/AI 발견 게시글이 있는지 확인하세요."
+                )
+            return self._create_empty_report(organization_id, target)
 
         payload = [
             {"id": str(p.id), "title": p.title, "summary": self._post_summary_for_report(p)}
@@ -152,5 +155,18 @@ class ReportService:
                     )
                 )
 
+        self.db.commit()
+        return self.get_report(report.id, organization_id)
+
+    def _create_empty_report(self, organization_id: UUID, target: date) -> DailyReportDetail:
+        report = DailyReport(
+            organization_id=organization_id,
+            report_date=target,
+            title=f"MINT 일일 리포트 ({target.isoformat()})",
+            summary="모니터링 대상 소스를 확인했으나, 오늘은 새로운 변화가 없습니다.",
+            model="none",
+            prompt_version="v1",
+        )
+        self.db.add(report)
         self.db.commit()
         return self.get_report(report.id, organization_id)
