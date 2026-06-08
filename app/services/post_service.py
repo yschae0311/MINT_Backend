@@ -6,6 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.exceptions import NotFoundError
+from app.models.ai_output import AIOutput
 from app.models.enums import BoardType, CreatedBy, PostStatus
 from app.models.post import Post
 from app.models.source import Source
@@ -48,9 +49,28 @@ class PostService:
             q = q.where(Post.source_id == source_id)
         if keyword:
             like = f"%{keyword}%"
-            q = q.where(or_(Post.title.ilike(like), Post.raw_content.ilike(like)))
+            q = q.outerjoin(AIOutput).where(
+                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
+            )
 
-        total = self.db.scalar(select(func.count()).select_from(q.subquery())) or 0
+        count_q = select(func.count(func.distinct(Post.id))).select_from(Post)
+        count_q = count_q.where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
+        if board_type:
+            count_q = count_q.where(Post.board_type == board_type)
+        if status:
+            count_q = count_q.where(Post.status == status)
+        if importance:
+            count_q = count_q.where(Post.importance == importance)
+        if category:
+            count_q = count_q.where(Post.category == category)
+        if source_id:
+            count_q = count_q.where(Post.source_id == source_id)
+        if keyword:
+            like = f"%{keyword}%"
+            count_q = count_q.outerjoin(AIOutput).where(
+                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
+            )
+        total = self.db.scalar(count_q) or 0
         posts = self.db.scalars(
             q.order_by(Post.collected_at.desc()).offset((page - 1) * size).limit(size)
         ).unique().all()
