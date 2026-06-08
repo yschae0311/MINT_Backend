@@ -71,3 +71,21 @@ class NotificationStatus(str, enum.Enum):
     success = "success"
     failed = "failed"
     pending = "pending"
+
+
+class JobType(str, enum.Enum):
+    crawl_source = "crawl_source"
+    crawl_source_discovery = "crawl_source_discovery"
+    crawl_all_discovery = "crawl_all_discovery"
+    crawl_all = "crawl_all"
+    discovery_pipeline = "discovery_pipeline"
+    generate_report = "generate_report"
+    send_slack_report = "send_slack_report"
+    summarize_post = "summarize_post"
+
+
+class JobStatus(str, enum.Enum):
+    pending = "pending"
+    running = "running"
+    success = "success"
+    failed = "failed"

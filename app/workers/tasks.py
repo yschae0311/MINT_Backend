@@ -6,10 +6,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
+from app.models.enums import JobType, TrustLevel
 from app.models.organization import Organization
 from app.models.post import Post
+from app.models.source import Source
 from app.services.ai_service import AIService
 from app.services.crawler_service import CrawlerService
+from app.services.job_service import JobService
 from app.services.report_service import ReportService
 from app.services.slack_service import SlackService
 from app.workers.celery_app import celery_app
@@ -22,48 +25,159 @@ def _kst_today() -> date:
     return datetime.now(KST).date()
 
 
+def _run_crawl_all(
+    db,
+    jobs: JobService,
+    job_id: UUID,
+    organization_id: UUID,
+    *,
+    to_discovery: bool,
+    trusted_only: bool,
+) -> str:
+    crawler = CrawlerService(db)
+    q = select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
+    if to_discovery and trusted_only:
+        q = q.where(Source.trust_level == TrustLevel.high)
+    sources = list(db.scalars(q).all())
+    total = len(sources)
+    jobs.update_progress(job_id, 0, total, f"0/{total} 소스 준비")
+
+    created_sum = 0
+    skipped_sum = 0
+    failed = 0
+    for i, source in enumerate(sources, start=1):
+        jobs.update_progress(job_id, i - 1, total, f"{i}/{total} · {source.name}")
+        result = crawler._crawl_source_safe(source, organization_id, to_discovery=to_discovery)
+        created_sum += result.created
+        skipped_sum += result.skipped
+        if result.error:
+            failed += 1
+
+    jobs.update_progress(job_id, total, total, "완료")
+    if failed:
+        return f"created {created_sum}, skipped {skipped_sum}, 실패 {failed}개 소스"
+    return f"created {created_sum}, skipped {skipped_sum}"
+
+
+@celery_app.task(name="app.workers.tasks.crawl_source_job_task")
+def crawl_source_job_task(job_id: str, source_id: str, organization_id: str, to_discovery: bool = False):
+    db = SessionLocal()
+    try:
+        jobs = JobService(db)
+        jobs.start_job(UUID(job_id))
+        jobs.update_progress(UUID(job_id), 0, 1, "크롤링 중…")
+        crawler = CrawlerService(db)
+        if to_discovery:
+            result = crawler.crawl_source_to_discovery(UUID(source_id), UUID(organization_id))
+        else:
+            result = crawler.crawl_source(UUID(source_id), UUID(organization_id))
+        msg = result.message or f"created {result.created}, skipped {result.skipped}"
+        if result.error:
+            jobs.fail_job(UUID(job_id), result.error)
+        else:
+            jobs.complete_job(UUID(job_id), msg)
+    except Exception as exc:
+        logger.exception("crawl_source_job_task failed job=%s", job_id)
+        JobService(db).fail_job(UUID(job_id), str(exc))
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.crawl_all_discovery_job_task")
+def crawl_all_discovery_job_task(job_id: str, organization_id: str, trusted_only: bool = True):
+    db = SessionLocal()
+    try:
+        jobs = JobService(db)
+        jobs.start_job(UUID(job_id))
+        msg = _run_crawl_all(
+            db,
+            jobs,
+            UUID(job_id),
+            UUID(organization_id),
+            to_discovery=True,
+            trusted_only=trusted_only,
+        )
+        jobs.complete_job(UUID(job_id), msg)
+    except Exception as exc:
+        logger.exception("crawl_all_discovery_job_task failed job=%s", job_id)
+        JobService(db).fail_job(UUID(job_id), str(exc))
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.generate_report_job_task")
+def generate_report_job_task(job_id: str, organization_id: str, report_date: str | None = None):
+    db = SessionLocal()
+    try:
+        jobs = JobService(db)
+        jobs.start_job(UUID(job_id))
+        jobs.update_progress(UUID(job_id), 0, 1, "리포트 생성 중…")
+        target = date.fromisoformat(report_date) if report_date else _kst_today()
+        report = ReportService(db).generate(
+            UUID(organization_id),
+            target,
+            prefer_yesterday=False,
+            allow_empty=True,
+        )
+        jobs.complete_job(UUID(job_id), f"리포트 생성 완료 ({report.report_date})")
+    except Exception as exc:
+        logger.exception("generate_report_job_task failed job=%s", job_id)
+        JobService(db).fail_job(UUID(job_id), str(exc))
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.workers.tasks.crawl_all_sources_task")
 def crawl_all_sources_task():
     db = SessionLocal()
     try:
         for org in db.scalars(select(Organization)).all():
-            results = CrawlerService(db).crawl_all_active(org.id)
-            created = sum(r.created for r in results)
-            errors = [r for r in results if r.error]
-            logger.info(
-                "crawl_all_sources org=%s sources=%d created=%d errors=%d",
+            jobs = JobService(db)
+            job = jobs.create_job(
                 org.id,
-                len(results),
-                created,
-                len(errors),
+                JobType.crawl_all,
+                "전체 소스 크롤링 (스케줄)",
+                progress_total=1,
             )
-            for r in errors:
-                logger.warning("crawl_all_sources failed source=%s: %s", r.source_id, r.error)
+            db.commit()
+            try:
+                jobs.start_job(job.id)
+                msg = _run_crawl_all(db, jobs, job.id, org.id, to_discovery=False, trusted_only=False)
+                jobs.complete_job(job.id, msg)
+            except Exception as exc:
+                logger.exception("crawl_all_sources org=%s failed", org.id)
+                jobs.fail_job(job.id, str(exc))
     finally:
         db.close()
 
 
 @celery_app.task(name="app.workers.tasks.discovery_pipeline_task")
 def discovery_pipeline_task(trusted_only: bool = True):
-    """
-    Daily pipeline:
-    trusted (important) sources crawl -> AI summary -> register into discovery board (pending).
-    """
     db = SessionLocal()
     try:
         for org in db.scalars(select(Organization)).all():
-            results = CrawlerService(db).crawl_all_active_to_discovery(org.id, trusted_only=trusted_only)
-            created = sum(r.created for r in results)
-            errors = [r for r in results if r.error]
-            logger.info(
-                "discovery_pipeline org=%s sources=%d created=%d errors=%d",
+            jobs = JobService(db)
+            job = jobs.create_job(
                 org.id,
-                len(results),
-                created,
-                len(errors),
+                JobType.discovery_pipeline,
+                "AI 발견 파이프라인 (스케줄)",
+                progress_total=1,
             )
-            for r in errors:
-                logger.warning("discovery_pipeline failed source=%s: %s", r.source_id, r.error)
+            db.commit()
+            try:
+                jobs.start_job(job.id)
+                msg = _run_crawl_all(
+                    db,
+                    jobs,
+                    job.id,
+                    org.id,
+                    to_discovery=True,
+                    trusted_only=trusted_only,
+                )
+                jobs.complete_job(job.id, msg)
+            except Exception as exc:
+                logger.exception("discovery_pipeline org=%s failed", org.id)
+                jobs.fail_job(job.id, str(exc))
     finally:
         db.close()
 
@@ -93,16 +207,22 @@ def generate_daily_report_task(report_date: str | None = None):
         target = date.fromisoformat(report_date) if report_date else _kst_today()
         logger.info("generate_daily_report target=%s", target)
         for org in db.scalars(select(Organization)).all():
+            jobs = JobService(db)
+            job = jobs.create_job(
+                org.id,
+                JobType.generate_report,
+                f"데일리 리포트 생성 (스케줄 · {target})",
+                progress_total=1,
+            )
+            db.commit()
             try:
+                jobs.start_job(job.id)
+                jobs.update_progress(job.id, 0, 1, "리포트 생성 중…")
                 report = ReportService(db).generate(org.id, target, allow_empty=True)
-                logger.info(
-                    "generate_daily_report org=%s report_id=%s date=%s",
-                    org.id,
-                    report.id,
-                    report.report_date,
-                )
+                jobs.complete_job(job.id, f"리포트 생성 완료 ({report.report_date})")
             except Exception as exc:
                 logger.warning("generate_daily_report org=%s date=%s failed: %s", org.id, target, exc)
+                jobs.fail_job(job.id, str(exc))
                 continue
             recent = db.scalars(select(Post).where(Post.organization_id == org.id).limit(20)).all()
             for post in recent:
@@ -126,19 +246,34 @@ def send_daily_report_to_slack_task(report_date: str | None = None):
         reports_by_org = {r.organization_id: r for r in reports}
 
         for org in db.scalars(select(Organization)).all():
+            jobs = JobService(db)
+            job = jobs.create_job(
+                org.id,
+                JobType.send_slack_report,
+                f"Slack 리포트 전송 (스케줄 · {target})",
+                progress_total=1,
+            )
+            db.commit()
             try:
+                jobs.start_job(job.id)
+                jobs.update_progress(job.id, 0, 1, "Slack 전송 중…")
                 report = reports_by_org.get(org.id)
                 if report:
                     result = SlackService(db).send_report(report.id, org.id)
                 else:
                     result = SlackService(db).send_no_changes(org.id, target)
                 if result.success:
+                    jobs.complete_job(
+                        job.id,
+                        "Slack 전송 완료" if report else "변경 없음 알림 전송 완료",
+                    )
                     logger.info(
                         "send_daily_report_to_slack org=%s sent (%s)",
                         org.id,
                         "report" if report else "no-changes",
                     )
                 else:
+                    jobs.fail_job(job.id, result.message)
                     logger.warning(
                         "send_daily_report_to_slack org=%s failed: %s",
                         org.id,
@@ -146,6 +281,7 @@ def send_daily_report_to_slack_task(report_date: str | None = None):
                     )
             except Exception as exc:
                 logger.warning("send_daily_report_to_slack org=%s failed: %s", org.id, exc)
+                jobs.fail_job(job.id, str(exc))
     finally:
         db.close()
 

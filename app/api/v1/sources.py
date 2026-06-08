@@ -1,14 +1,19 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.exceptions import NotFoundError
 from app.core.security import get_current_user
+from app.models.enums import JobType
+from app.models.source import Source
 from app.models.user import User
-from app.schemas.source import CrawlResult, SourceCreate, SourceRead, SourceUpdate
-from app.services.crawler_service import CrawlerService
+from app.schemas.job import JobRead
+from app.schemas.source import SourceCreate, SourceRead, SourceUpdate
+from app.services.job_service import JobService, dispatch_task
 from app.services.source_service import SourceService
+from app.workers.tasks import crawl_all_discovery_job_task, crawl_source_job_task
 
 router = APIRouter()
 
@@ -55,36 +60,94 @@ def delete_source(
     SourceService(db).delete_source(source_id, user.organization_id)
 
 
-@router.post("/{source_id}/crawl", response_model=CrawlResult)
+@router.post("/{source_id}/crawl", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
 def crawl_source(
     source_id: UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return CrawlerService(db).crawl_source(source_id, user.organization_id)
+    source = db.get(Source, source_id)
+    if not source or source.organization_id != user.organization_id:
+        raise NotFoundError("Source not found")
+    jobs = JobService(db)
+    jobs.require_idle(user.organization_id)
+    job = jobs.create_job(
+        user.organization_id,
+        JobType.crawl_source,
+        f"소스 크롤링 · {source.name}",
+        triggered_by=user.id,
+        progress_total=1,
+    )
+    db.commit()
+    dispatch_task(
+        crawl_source_job_task,
+        str(job.id),
+        str(source_id),
+        str(user.organization_id),
+        False,
+        db=db,
+    )
+    return JobRead.model_validate(job)
 
 
-@router.post("/{source_id}/crawl-to-discovery", response_model=CrawlResult)
+@router.post(
+    "/{source_id}/crawl-to-discovery",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def crawl_source_to_discovery(
     source_id: UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Manual pipeline trigger for a single source.
-    Always stores results in discovery board (pending) and runs AI summary.
-    """
-    return CrawlerService(db).crawl_source_to_discovery(source_id, user.organization_id)
+    source = db.get(Source, source_id)
+    if not source or source.organization_id != user.organization_id:
+        raise NotFoundError("Source not found")
+    jobs = JobService(db)
+    jobs.require_idle(user.organization_id)
+    job = jobs.create_job(
+        user.organization_id,
+        JobType.crawl_source_discovery,
+        f"AI 발견 크롤링 · {source.name}",
+        triggered_by=user.id,
+        progress_total=1,
+    )
+    db.commit()
+    dispatch_task(
+        crawl_source_job_task,
+        str(job.id),
+        str(source_id),
+        str(user.organization_id),
+        True,
+        db=db,
+    )
+    return JobRead.model_validate(job)
 
 
-@router.post("/crawl-all-to-discovery", response_model=list[CrawlResult])
+@router.post(
+    "/crawl-all-to-discovery",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def crawl_all_to_discovery(
     trusted_only: bool = True,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Manual pipeline trigger for all active sources.
-    Defaults to "trusted_only" (trust_level=high).
-    """
-    return CrawlerService(db).crawl_all_active_to_discovery(user.organization_id, trusted_only=trusted_only)
+    jobs = JobService(db)
+    jobs.require_idle(user.organization_id)
+    job = jobs.create_job(
+        user.organization_id,
+        JobType.crawl_all_discovery,
+        "전체 AI 발견 파이프라인",
+        triggered_by=user.id,
+    )
+    db.commit()
+    dispatch_task(
+        crawl_all_discovery_job_task,
+        str(job.id),
+        str(user.organization_id),
+        trusted_only,
+        db=db,
+    )
+    return JobRead.model_validate(job)
