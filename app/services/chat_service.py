@@ -18,6 +18,12 @@ _REFUSAL_REPLY = (
     "· 중요 게시판 최근 정책 변화 알려줘"
 )
 
+_CONFIRM_GENERAL_REPLY = (
+    "MINT에 수집된 자료에서는 이 질문과 직접 관련된 게시글을 찾지 못했습니다.\n\n"
+    "Gemini의 EV·충전 일반 지식으로 답변해 드릴까요?\n"
+    "(MINT 게시글 출처가 아닌 참고 답변입니다)"
+)
+
 # Cheap pre-filter before LLM guard (saves tokens)
 _OFF_TOPIC_HINTS = (
     "날씨",
@@ -73,17 +79,38 @@ class ChatService:
     def __init__(self, db: Session):
         self.db = db
 
-    def ask(self, organization_id: UUID, message: str) -> ChatAskResponse:
+    def ask(
+        self,
+        organization_id: UUID,
+        message: str,
+        *,
+        allow_general: bool = False,
+    ) -> ChatAskResponse:
         question = message.strip()
         blocked = self._check_guard(question)
         if blocked:
             return ChatAskResponse(reply=blocked, citations=[])
 
-        posts = self._find_relevant_posts(organization_id, question)
-        context, citations = self._build_context(posts)
         client = get_llm_client()
+
+        if allow_general:
+            reply = client.answer_question_general(question)
+            return ChatAskResponse(reply=reply, citations=[], source="general")
+
+        matched = self._search_matched_posts(organization_id, question)
+        if not matched and not allow_general:
+            if self._is_meta_question(question.lower()):
+                reply = client.answer_question_general(question)
+                return ChatAskResponse(reply=reply, citations=[], source="general")
+            return ChatAskResponse(
+                reply=_CONFIRM_GENERAL_REPLY,
+                citations=[],
+                needs_general_confirm=True,
+            )
+
+        context, citations = self._build_context(matched)
         reply = client.answer_question(question, context)
-        return ChatAskResponse(reply=reply, citations=citations)
+        return ChatAskResponse(reply=reply, citations=citations, source="mint")
 
     def _check_guard(self, question: str) -> str | None:
         blob = question.lower()
@@ -102,7 +129,6 @@ class ChatService:
             if result.get("is_allowed", False):
                 return None
         except Exception:
-            # Guard 실패 시 보수적으로 차단
             return _REFUSAL_REPLY
 
         return _REFUSAL_REPLY
@@ -110,14 +136,19 @@ class ChatService:
     def _is_meta_question(self, blob: str) -> bool:
         return any(h in blob for h in _META_HINTS)
 
-    def _find_relevant_posts(self, organization_id: UUID, question: str, limit: int = 8) -> list[Post]:
-        tokens = [t for t in re.split(r"[\s,?.!]+", question) if len(t) >= 2][:5]
+    def _search_matched_posts(
+        self, organization_id: UUID, question: str, limit: int = 8
+    ) -> list[Post]:
+        tokens = [t for t in re.split(r"[\s,?.!·]+", question) if len(t) >= 2][:5]
+        if not tokens:
+            return []
+
         seen: set[UUID] = set()
         posts: list[Post] = []
 
         base = (
             select(Post)
-            .options(joinedload(Post.ai_outputs))
+            .options(joinedload(Post.source), joinedload(Post.ai_outputs))
             .outerjoin(AIOutput)
             .where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
         )
@@ -125,7 +156,13 @@ class ChatService:
         for token in tokens:
             like = f"%{token}%"
             found = self.db.scalars(
-                base.where(or_(Post.title.ilike(like), AIOutput.summary.ilike(like)))
+                base.where(
+                    or_(
+                        Post.title.ilike(like),
+                        Post.raw_content.ilike(like),
+                        AIOutput.summary.ilike(like),
+                    )
+                )
                 .order_by(Post.collected_at.desc())
                 .limit(5)
             ).unique().all()
@@ -134,25 +171,9 @@ class ChatService:
                     seen.add(post.id)
                     posts.append(post)
 
-        if len(posts) < 5:
-            recent = self.db.scalars(
-                select(Post)
-                .options(joinedload(Post.ai_outputs))
-                .where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
-                .order_by(Post.collected_at.desc())
-                .limit(limit)
-            ).unique().all()
-            for post in recent:
-                if post.id not in seen:
-                    seen.add(post.id)
-                    posts.append(post)
-
         return posts[:limit]
 
     def _build_context(self, posts: list[Post]) -> tuple[str, list[ChatCitation]]:
-        if not posts:
-            return "수집된 게시글이 없습니다.", []
-
         blocks: list[str] = []
         citations: list[ChatCitation] = []
 

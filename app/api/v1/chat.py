@@ -16,4 +16,8 @@ def ask_chat(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return ChatService(db).ask(user.organization_id, body.message.strip())
+    return ChatService(db).ask(
+        user.organization_id,
+        body.message.strip(),
+        allow_general=body.allow_general,
+    )

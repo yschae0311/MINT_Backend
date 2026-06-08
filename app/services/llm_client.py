@@ -45,6 +45,10 @@ class LLMClient(ABC):
     def classify_chat_question(self, question: str) -> dict:
         ...
 
+    @abstractmethod
+    def answer_question_general(self, question: str) -> str:
+        ...
+
 
 class GeminiClient(LLMClient):
     def __init__(self) -> None:
@@ -87,6 +91,11 @@ class GeminiClient(LLMClient):
         system = _load_prompt("chat_guard_v1.md")
         user = f"질문: {question[:1000]}"
         return _parse_json(self._generate(self.summary_model, system, user))
+
+    def answer_question_general(self, question: str) -> str:
+        system = _load_prompt("chat_general_v1.md")
+        user = f"[질문]\n{question}"
+        return self._generate(self.summary_model, system, user)
 
 
 class MockLLMClient(LLMClient):
@@ -164,6 +173,12 @@ class MockLLMClient(LLMClient):
         if any(h in blob for h in meta):
             return {"is_allowed": True, "reason": "MINT 메타 질문"}
         return {"is_allowed": False, "reason": "EV/충전 범위 밖 질문"}
+
+    def answer_question_general(self, question: str) -> str:
+        return (
+            f"(Mock 일반 지식) '{question[:80]}'에 대한 EV·충전 분야 참고 답변입니다.\n\n"
+            "※ MINT 수집 자료가 아닌 일반 참고 답변입니다."
+        )
 
     def answer_question(self, question: str, context: str) -> str:
         if "수집된 게시글이 없습니다" in context:
