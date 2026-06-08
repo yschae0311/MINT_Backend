@@ -28,6 +28,18 @@ class ReportService:
         ).all()
         return [DailyReportRead.model_validate(r) for r in reports]
 
+    def delete_report(self, report_id: UUID, organization_id: UUID) -> None:
+        report = self.db.scalar(
+            select(DailyReport).where(
+                DailyReport.id == report_id,
+                DailyReport.organization_id == organization_id,
+            )
+        )
+        if not report:
+            raise NotFoundError("Report not found")
+        self.db.delete(report)
+        self.db.commit()
+
     def get_report(self, report_id: UUID, organization_id: UUID) -> DailyReportDetail:
         report = self.db.scalar(
             select(DailyReport)

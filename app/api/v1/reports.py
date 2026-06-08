@@ -64,6 +64,15 @@ def generate_report(
     return JobRead.model_validate(job)
 
 
+@router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_report(
+    report_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ReportService(db).delete_report(report_id, user.organization_id)
+
+
 @router.post("/{report_id}/send-slack", response_model=SlackTestResponse)
 def send_report_slack(
     report_id: UUID,
