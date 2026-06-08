@@ -41,6 +41,10 @@ class LLMClient(ABC):
     def answer_question(self, question: str, context: str) -> str:
         ...
 
+    @abstractmethod
+    def classify_chat_question(self, question: str) -> dict:
+        ...
+
 
 class GeminiClient(LLMClient):
     def __init__(self) -> None:
@@ -78,6 +82,11 @@ class GeminiClient(LLMClient):
         system = _load_prompt("chat_assistant_v1.md")
         user = f"[참고 자료]\n{context[:14000]}\n\n[질문]\n{question}"
         return self._generate(self.summary_model, system, user)
+
+    def classify_chat_question(self, question: str) -> dict:
+        system = _load_prompt("chat_guard_v1.md")
+        user = f"질문: {question[:1000]}"
+        return _parse_json(self._generate(self.summary_model, system, user))
 
 
 class MockLLMClient(LLMClient):
@@ -146,6 +155,15 @@ class MockLLMClient(LLMClient):
             "risks": ["외부 API 미연결 시 Mock 데이터 사용"],
             "action_items": ["Gemini API 키 설정 후 재생성"],
         }
+
+    def classify_chat_question(self, question: str) -> dict:
+        blob = question.lower()
+        if any(h in blob for h in self._EV_HINTS):
+            return {"is_allowed": True, "reason": "EV/충전 관련 키워드"}
+        meta = ("mint", "뭐 할", "도움", "사용법", "기능", "게시판", "리포트")
+        if any(h in blob for h in meta):
+            return {"is_allowed": True, "reason": "MINT 메타 질문"}
+        return {"is_allowed": False, "reason": "EV/충전 범위 밖 질문"}
 
     def answer_question(self, question: str, context: str) -> str:
         if "수집된 게시글이 없습니다" in context:
