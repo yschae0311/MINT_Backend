@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestError
-from app.services.ev_relevance import passes_keyword_gate
+from app.services.ev_relevance import is_obvious_junk
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -74,15 +74,15 @@ class GeminiClient(LLMClient):
         return _parse_json(self._generate(self.summary_model, system, user))
 
     def evaluate_discovery_candidate(self, title: str, content: str, url: str) -> dict:
-        if not passes_keyword_gate(title, content, url):
+        if is_obvious_junk(title, content, url):
             return {
                 "is_relevant": False,
-                "relevance_reason": "EV/충전 관련 키워드가 충분하지 않습니다.",
+                "relevance_reason": "사이트 안내·약관 등 명백한 무관 페이지",
                 "summary": "",
                 "impact": "",
                 "action_items": [],
                 "importance": "low",
-                "confidence": 0.2,
+                "confidence": 0.9,
             }
         system = _load_prompt("discovery_evaluate_v1.md")
         user = f"URL: {url}\nTitle: {title}\n\nContent:\n{content[:12000]}"
@@ -124,7 +124,9 @@ class MockLLMClient(LLMClient):
     )
 
     def _looks_ev_related(self, title: str, content: str, url: str) -> bool:
-        return passes_keyword_gate(title, content, url)
+        from app.services.ev_relevance import has_ev_hint
+
+        return not is_obvious_junk(title, content, url) and has_ev_hint(title, content, url)
 
     def summarize_post(self, title: str, content: str) -> dict:
         return {
