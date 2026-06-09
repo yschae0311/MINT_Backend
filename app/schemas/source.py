@@ -64,3 +64,4 @@ class CrawlResult(BaseModel):
     message: str
     error: str | None = None
     skip_reasons: dict[str, int] = Field(default_factory=dict)
+    error_sample: str | None = None

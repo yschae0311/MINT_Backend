@@ -52,6 +52,8 @@ def _run_crawl_all(
         created_sum += result.created
         for reason, count in (result.skip_reasons or {}).items():
             stats.add(reason, count)
+        if result.error_sample and not stats.error_sample:
+            stats.error_sample = result.error_sample
         if result.error:
             failed += 1
             stats.add("source_error")

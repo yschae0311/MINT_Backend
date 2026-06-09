@@ -15,14 +15,22 @@ def _load_prompt(name: str) -> str:
 
 
 def _parse_json(text: str) -> dict:
-    text = text.strip()
+    text = (text or "").strip()
+    if not text:
+        raise BadRequestError("LLM returned empty response")
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\n?", "", text)
-        text = re.sub(r"\n?```$", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
     try:
         return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise BadRequestError(f"LLM returned invalid JSON: {text[:200]}") from exc
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError as exc:
+                raise BadRequestError(f"LLM returned invalid JSON: {text[:200]}") from exc
+        raise BadRequestError(f"LLM returned invalid JSON: {text[:200]}")
 
 
 class LLMClient(ABC):
@@ -63,15 +71,26 @@ class GeminiClient(LLMClient):
         self.summary_model = settings.gemini_summary_model
         self.report_model = settings.gemini_report_model
 
-    def _generate(self, model_name: str, system: str, user: str) -> str:
+    def _generate(self, model_name: str, system: str, user: str, *, json_mode: bool = False) -> str:
         model = self._genai.GenerativeModel(model_name, system_instruction=system)
-        response = model.generate_content(user)
-        return response.text or ""
+        kwargs: dict = {}
+        if json_mode:
+            kwargs["generation_config"] = self._genai.GenerationConfig(
+                response_mime_type="application/json"
+            )
+        response = model.generate_content(user, **kwargs)
+        text = response.text or ""
+        if not text:
+            finish = ""
+            if getattr(response, "candidates", None):
+                finish = str(getattr(response.candidates[0], "finish_reason", ""))
+            raise BadRequestError(f"Gemini empty response (finish_reason={finish})")
+        return text
 
     def summarize_post(self, title: str, content: str) -> dict:
         system = _load_prompt("post_summary_v1.md")
         user = f"Title: {title}\n\nContent:\n{content[:12000]}"
-        return _parse_json(self._generate(self.summary_model, system, user))
+        return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
 
     def evaluate_discovery_candidate(self, title: str, content: str, url: str) -> dict:
         if is_obvious_junk(title, content, url):
@@ -86,12 +105,12 @@ class GeminiClient(LLMClient):
             }
         system = _load_prompt("discovery_evaluate_v1.md")
         user = f"URL: {url}\nTitle: {title}\n\nContent:\n{content[:12000]}"
-        return _parse_json(self._generate(self.summary_model, system, user))
+        return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
 
     def generate_daily_report(self, posts: list[dict]) -> dict:
         system = _load_prompt("daily_report_v1.md")
         user = json.dumps({"posts": posts}, ensure_ascii=False)
-        return _parse_json(self._generate(self.report_model, system, user))
+        return _parse_json(self._generate(self.report_model, system, user, json_mode=True))
 
     def answer_question(self, question: str, context: str) -> str:
         system = _load_prompt("chat_assistant_v1.md")
@@ -101,7 +120,7 @@ class GeminiClient(LLMClient):
     def classify_chat_question(self, question: str) -> dict:
         system = _load_prompt("chat_guard_v1.md")
         user = f"질문: {question[:1000]}"
-        return _parse_json(self._generate(self.summary_model, system, user))
+        return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
 
     def answer_question_general(self, question: str) -> str:
         system = _load_prompt("chat_general_v1.md")

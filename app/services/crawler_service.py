@@ -18,7 +18,7 @@ from app.models.enums import BoardType, CreatedBy, Importance, PostStatus, Sourc
 from app.models.post import Post
 from app.models.source import Source
 from app.schemas.source import CrawlResult
-from app.services.crawl_skip_stats import CrawlSkipStats
+from app.services.crawl_skip_stats import CrawlSkipStats, classify_eval_error
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 
@@ -119,6 +119,7 @@ class CrawlerService:
             skipped=skipped,
             message=stats.format_summary(created),
             skip_reasons=stats.to_dict(),
+            error_sample=stats.error_sample,
         )
 
     def _crawl_discovery_rss(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
@@ -146,7 +147,7 @@ class CrawlerService:
             if entry.get("published_parsed"):
                 published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
 
-            ok, reason = self._process_discovery_candidate(source, title, url, content, published)
+            ok, reason = self._process_discovery_candidate(source, title, url, content, published, stats)
             if ok:
                 created += 1
             else:
@@ -170,7 +171,7 @@ class CrawlerService:
                 skipped += 1
                 stats.add("fetch_failed")
                 continue
-            ok, reason = self._process_discovery_candidate(source, title, url, content, None)
+            ok, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
             if ok:
                 created += 1
             else:
@@ -191,7 +192,7 @@ class CrawlerService:
         title = soup.title.string.strip() if soup.title and soup.title.string else source.name
         content = self._extract_main_text(soup, source.source_type)
         content = re.sub(r"\s+", " ", content).strip()[:8000]
-        ok, reason = self._process_discovery_candidate(source, title, source.url, content, None)
+        ok, reason = self._process_discovery_candidate(source, title, source.url, content, None, stats)
         if ok:
             return 1, 0
         stats.add(reason or "other")
@@ -243,6 +244,7 @@ class CrawlerService:
         url: str,
         content: str,
         published_at: datetime | None,
+        stats: CrawlSkipStats,
     ) -> tuple[bool, str | None]:
         title = (title or "").strip()[:512]
         content = (content or "").strip()
@@ -255,12 +257,20 @@ class CrawlerService:
             logger.debug("Discovery keyword gate rejected: %s", title[:80])
             return False, "site_junk"
 
+        if stats.billing_depleted:
+            stats.add("ai_billing_depleted")
+            return False, "ai_billing_depleted"
+
         try:
             client = get_llm_client()
             evaluation = client.evaluate_discovery_candidate(title, content, url)
         except Exception as exc:
+            reason = classify_eval_error(exc)
             logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
-            return False, "ai_eval_failed"
+            stats.add(reason, sample=str(exc))
+            if reason == "ai_billing_depleted":
+                logger.error("Gemini billing depleted — skipping further AI evaluations this run")
+            return False, reason
 
         reject = ai_reject_reason(evaluation, title, content, url)
         if reject:
