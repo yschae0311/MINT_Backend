@@ -107,10 +107,11 @@ class ReportService:
         eligible = [
             p
             for p in posts
-            if p.board_type == BoardType.trusted
-            or p.importance == Importance.high
-            or (p.board_type == BoardType.discovery and p.status == PostStatus.pending)
+            if p.board_type in (BoardType.trusted, BoardType.discovery)
         ]
+        trusted_posts = [p for p in eligible if p.board_type == BoardType.trusted]
+        discovery_posts = [p for p in eligible if p.board_type == BoardType.discovery]
+
         if not eligible:
             if not allow_empty:
                 raise BadRequestError(
@@ -119,9 +120,17 @@ class ReportService:
                 )
             return self._create_empty_report(organization_id, target)
 
+        # 중요 게시판 우선, AI 발견 게시판을 함께 포함 (최대 40건)
+        ordered = trusted_posts + discovery_posts
         payload = [
-            {"id": str(p.id), "title": p.title, "summary": self._post_summary_for_report(p)}
-            for p in eligible[:40]
+            {
+                "id": str(p.id),
+                "title": p.title,
+                "summary": self._post_summary_for_report(p),
+                "board": "trusted" if p.board_type == BoardType.trusted else "discovery",
+                "importance": p.importance.value if p.importance != Importance.unknown else "medium",
+            }
+            for p in ordered[:40]
         ]
         client = get_llm_client()
         result = client.generate_daily_report(payload)
@@ -145,27 +154,26 @@ class ReportService:
             for pid in change.get("related_post_ids") or []:
                 related_ids.add(str(pid))
 
-        for post in eligible:
-            if str(post.id) in related_ids or post.importance == Importance.high:
-                self.db.add(
-                    DailyReportItem(
-                        report_id=report.id,
-                        post_id=post.id,
-                        reason=post.title[:200],
-                        importance=post.importance if post.importance != Importance.unknown else Importance.medium,
-                    )
-                )
+        item_posts: list[Post] = []
+        for post in ordered:
+            if str(post.id) in related_ids:
+                item_posts.append(post)
+        for post in ordered:
+            if post.importance == Importance.high and post not in item_posts:
+                item_posts.append(post)
+        if not item_posts:
+            item_posts = ordered[:15]
 
-        if not report.items:
-            for post in eligible[:10]:
-                self.db.add(
-                    DailyReportItem(
-                        report_id=report.id,
-                        post_id=post.id,
-                        reason="Included in daily report",
-                        importance=post.importance if post.importance != Importance.unknown else Importance.medium,
-                    )
+        for post in item_posts[:30]:
+            board_label = "중요" if post.board_type == BoardType.trusted else "AI발견"
+            self.db.add(
+                DailyReportItem(
+                    report_id=report.id,
+                    post_id=post.id,
+                    reason=f"[{board_label}] {post.title[:180]}",
+                    importance=post.importance if post.importance != Importance.unknown else Importance.medium,
                 )
+            )
 
         self.db.commit()
         return self.get_report(report.id, organization_id)

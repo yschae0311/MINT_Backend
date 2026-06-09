@@ -18,7 +18,8 @@ from app.models.enums import BoardType, CreatedBy, Importance, PostStatus, Sourc
 from app.models.post import Post
 from app.models.source import Source
 from app.schemas.source import CrawlResult
-from app.services.ev_relevance import passes_ai_evaluation, passes_keyword_gate
+from app.services.crawl_skip_stats import CrawlSkipStats
+from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
@@ -102,12 +103,13 @@ class CrawlerService:
         if not source.is_active:
             raise BadRequestError("Source is inactive")
 
+        stats = CrawlSkipStats()
         if source.source_type == SourceType.rss:
-            created, skipped = self._crawl_discovery_rss(source)
+            created, skipped = self._crawl_discovery_rss(source, stats)
         elif source.source_type in (SourceType.news_page, SourceType.notice_page):
-            created, skipped = self._crawl_discovery_list_page(source)
+            created, skipped = self._crawl_discovery_list_page(source, stats)
         else:
-            created, skipped = self._crawl_discovery_single_page(source)
+            created, skipped = self._crawl_discovery_single_page(source, stats)
 
         source.last_crawled_at = datetime.now(timezone.utc)
         self.db.commit()
@@ -115,10 +117,11 @@ class CrawlerService:
             source_id=source.id,
             created=created,
             skipped=skipped,
-            message=f"Created {created}, skipped {skipped}",
+            message=stats.format_summary(created),
+            skip_reasons=stats.to_dict(),
         )
 
-    def _crawl_discovery_rss(self, source: Source) -> tuple[int, int]:
+    def _crawl_discovery_rss(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
         feed = feedparser.parse(source.url)
         created = skipped = 0
         for entry in feed.entries[: self.discovery_max_candidates]:
@@ -126,6 +129,7 @@ class CrawlerService:
             title = (entry.get("title") or "Untitled").strip()
             if not url:
                 skipped += 1
+                stats.add("no_url")
                 continue
 
             content = entry.get("summary") or entry.get("description") or ""
@@ -135,42 +139,51 @@ class CrawlerService:
                     content = self._fetch_article_text(url, source.source_type)
                 except Exception:
                     skipped += 1
+                    stats.add("fetch_failed")
                     continue
 
             published = None
             if entry.get("published_parsed"):
                 published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
 
-            if self._process_discovery_candidate(source, title, url, content, published):
+            ok, reason = self._process_discovery_candidate(source, title, url, content, published)
+            if ok:
                 created += 1
             else:
                 skipped += 1
+                stats.add(reason or "other")
         return created, skipped
 
-    def _crawl_discovery_list_page(self, source: Source) -> tuple[int, int]:
+    def _crawl_discovery_list_page(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
         resp = self._fetch_url(source.url)
         soup = BeautifulSoup(resp.text, "html.parser")
         candidates = self._extract_article_links(soup, source.url)
 
         created = skipped = 0
         if not candidates:
-            # 목록 추출 실패 시 단일 페이지로 폴백
-            return self._crawl_discovery_single_page(source, soup=soup)
+            return self._crawl_discovery_single_page(source, stats, soup=soup)
 
         for title, url in candidates[: self.discovery_max_candidates]:
             try:
                 content = self._fetch_article_text(url, source.source_type)
             except Exception:
                 skipped += 1
+                stats.add("fetch_failed")
                 continue
-            if self._process_discovery_candidate(source, title, url, content, None):
+            ok, reason = self._process_discovery_candidate(source, title, url, content, None)
+            if ok:
                 created += 1
             else:
                 skipped += 1
+                stats.add(reason or "other")
         return created, skipped
 
     def _crawl_discovery_single_page(
-        self, source: Source, *, soup: BeautifulSoup | None = None
+        self,
+        source: Source,
+        stats: CrawlSkipStats,
+        *,
+        soup: BeautifulSoup | None = None,
     ) -> tuple[int, int]:
         if soup is None:
             resp = self._fetch_url(source.url)
@@ -178,9 +191,11 @@ class CrawlerService:
         title = soup.title.string.strip() if soup.title and soup.title.string else source.name
         content = self._extract_main_text(soup, source.source_type)
         content = re.sub(r"\s+", " ", content).strip()[:8000]
-        created = 1 if self._process_discovery_candidate(source, title, source.url, content, None) else 0
-        skipped = 0 if created else 1
-        return created, skipped
+        ok, reason = self._process_discovery_candidate(source, title, source.url, content, None)
+        if ok:
+            return 1, 0
+        stats.add(reason or "other")
+        return 0, 1
 
     def _fetch_article_text(self, url: str, source_type: SourceType) -> str:
         resp = self._fetch_url(url)
@@ -228,27 +243,33 @@ class CrawlerService:
         url: str,
         content: str,
         published_at: datetime | None,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         title = (title or "").strip()[:512]
         content = (content or "").strip()
-        if not title or len(title) < 2 or len(content) < self.min_content_len:
-            return False
+        if not title or len(title) < 2:
+            return False, "title_invalid"
+        if len(content) < self.min_content_len:
+            return False, "content_short"
 
         if not passes_keyword_gate(title, content, url):
             logger.debug("Discovery keyword gate rejected: %s", title[:80])
-            return False
+            return False, "site_junk"
 
         try:
             client = get_llm_client()
             evaluation = client.evaluate_discovery_candidate(title, content, url)
         except Exception as exc:
             logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
-            return False
+            return False, "ai_eval_failed"
 
-        if not passes_ai_evaluation(evaluation, title, content, url):
-            reason = evaluation.get("relevance_reason") or "EV/충전 관련성 미달"
-            logger.debug("Discovery rejected after AI+rules: %s — %s", title[:80], reason)
-            return False
+        reject = ai_reject_reason(evaluation, title, content, url)
+        if reject:
+            logger.debug(
+                "Discovery rejected: %s — %s",
+                title[:80],
+                evaluation.get("relevance_reason") or reject,
+            )
+            return False, reject
 
         return self._save_discovery_post(source, title, url, evaluation, published_at)
 
@@ -261,7 +282,7 @@ class CrawlerService:
         published_at: datetime | None,
         *,
         revive_deleted: bool = True,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         imp_raw = evaluation.get("importance", "medium")
         try:
             importance = Importance(imp_raw)
@@ -287,8 +308,8 @@ class CrawlerService:
                 existing.created_by = CreatedBy.ai_discovery
                 existing.importance = importance
                 self._attach_discovery_ai_output(existing, evaluation)
-                return True
-            return False
+                return True, None
+            return False, "duplicate"
 
         post = Post(
             organization_id=source.organization_id,
@@ -309,7 +330,7 @@ class CrawlerService:
         self.db.add(post)
         self.db.flush()
         self._attach_discovery_ai_output(post, evaluation)
-        return True
+        return True, None
 
     def _attach_discovery_ai_output(self, post: Post, evaluation: dict) -> None:
         imp_raw = evaluation.get("importance", "medium")

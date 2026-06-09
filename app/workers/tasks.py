@@ -11,6 +11,7 @@ from app.models.organization import Organization
 from app.models.post import Post
 from app.models.source import Source
 from app.services.ai_service import AIService
+from app.services.crawl_skip_stats import CrawlSkipStats
 from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService
 from app.services.report_service import ReportService
@@ -43,20 +44,20 @@ def _run_crawl_all(
     jobs.update_progress(job_id, 0, total, f"0/{total} 소스 준비")
 
     created_sum = 0
-    skipped_sum = 0
+    stats = CrawlSkipStats()
     failed = 0
     for i, source in enumerate(sources, start=1):
         jobs.update_progress(job_id, i - 1, total, f"{i}/{total} · {source.name}")
         result = crawler._crawl_source_safe(source, organization_id, to_discovery=to_discovery)
         created_sum += result.created
-        skipped_sum += result.skipped
+        for reason, count in (result.skip_reasons or {}).items():
+            stats.add(reason, count)
         if result.error:
             failed += 1
+            stats.add("source_error")
 
     jobs.update_progress(job_id, total, total, "완료")
-    if failed:
-        return f"created {created_sum}, skipped {skipped_sum}, 실패 {failed}개 소스"
-    return f"created {created_sum}, skipped {skipped_sum}"
+    return stats.format_summary(created_sum, failed_sources=failed)
 
 
 @celery_app.task(name="app.workers.tasks.crawl_source_job_task")

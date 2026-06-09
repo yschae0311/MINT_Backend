@@ -75,13 +75,17 @@ def passes_keyword_gate(title: str, content: str, url: str = "") -> bool:
     return not is_obvious_junk(title, content, url)
 
 
-def passes_ai_evaluation(evaluation: dict, title: str, content: str, url: str = "") -> bool:
-    """AI is_relevant를 우선. 명백한 쓰레기·지나치게 낮은 confidence만 추가 차단."""
+def ai_reject_reason(evaluation: dict, title: str, content: str, url: str = "") -> str | None:
+    """AI/규칙 거부 시 스킵 사유 키 반환. 통과하면 None."""
     if is_obvious_junk(title, content, url):
-        return False
+        return "site_junk"
     if not evaluation.get("is_relevant"):
-        return False
+        return "ai_not_relevant"
     confidence = evaluation.get("confidence")
     if isinstance(confidence, (int, float)) and confidence < _MIN_CONFIDENCE:
-        return False
-    return True
+        return "ai_low_confidence"
+    return None
+
+
+def passes_ai_evaluation(evaluation: dict, title: str, content: str, url: str = "") -> bool:
+    return ai_reject_reason(evaluation, title, content, url) is None

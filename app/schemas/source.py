@@ -63,3 +63,4 @@ class CrawlResult(BaseModel):
     skipped: int
     message: str
     error: str | None = None
+    skip_reasons: dict[str, int] = Field(default_factory=dict)
