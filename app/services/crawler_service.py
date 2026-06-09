@@ -18,6 +18,7 @@ from app.models.enums import BoardType, CreatedBy, Importance, PostStatus, Sourc
 from app.models.post import Post
 from app.models.source import Source
 from app.schemas.source import CrawlResult
+from app.services.ev_relevance import passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
@@ -233,6 +234,10 @@ class CrawlerService:
         if not title or len(title) < 2 or len(content) < self.min_content_len:
             return False
 
+        if not passes_keyword_gate(title, content, url):
+            logger.debug("Discovery keyword gate rejected: %s", title[:80])
+            return False
+
         try:
             client = get_llm_client()
             evaluation = client.evaluate_discovery_candidate(title, content, url)
@@ -240,7 +245,9 @@ class CrawlerService:
             logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
             return False
 
-        if not evaluation.get("is_relevant"):
+        if not passes_ai_evaluation(evaluation, title, content, url):
+            reason = evaluation.get("relevance_reason") or "EV/충전 관련성 미달"
+            logger.debug("Discovery rejected after AI+rules: %s — %s", title[:80], reason)
             return False
 
         return self._save_discovery_post(source, title, url, evaluation, published_at)
@@ -439,6 +446,20 @@ class CrawlerService:
         if len(content) < self.min_content_len:
             return False
 
+        if not passes_keyword_gate(title, content, url or ""):
+            logger.debug("Crawl keyword gate rejected: %s", title[:80])
+            return False
+
+        evaluation: dict | None = None
+        if self.ai_judge_on_crawl:
+            try:
+                evaluation = get_llm_client().evaluate_discovery_candidate(title, content, url or "")
+            except Exception as exc:
+                logger.warning("Crawl AI evaluation failed for %s: %s", url, exc)
+                return False
+            if not passes_ai_evaluation(evaluation, title, content, url or ""):
+                return False
+
         content_hash = hashlib.sha256(f"{url}|{title}".encode()).hexdigest()
         existing = self.db.scalar(
             select(Post).where(
@@ -457,19 +478,20 @@ class CrawlerService:
                 existing.status = PostStatus.pending
                 existing.board_type = BoardType.discovery
                 existing.created_by = created_by
-                # AI 판단(요약/중요도) 생성
-                if self.ai_judge_on_crawl:
-                    from app.services.ai_service import AIService
-
+                if evaluation:
+                    imp_raw = evaluation.get("importance", "medium")
                     try:
-                        ai = AIService(self.db).summarize_post(existing.id, source.organization_id)
-                        importance: Importance = ai.importance
-                        existing.importance = importance
-                        existing.status = PostStatus.pending
-                        existing.board_type = BoardType.discovery
-                    except Exception:
-                        existing.status = PostStatus.pending
-                        existing.board_type = BoardType.discovery
+                        existing.importance = Importance(imp_raw)
+                    except ValueError:
+                        existing.importance = Importance.medium
+                    self._attach_discovery_ai_output(existing, evaluation)
+                    if (
+                        allow_auto_publish
+                        and source.auto_publish
+                        and existing.importance in (Importance.high, Importance.medium)
+                    ):
+                        existing.board_type = BoardType.trusted
+                        existing.status = PostStatus.published
                 return True
 
             return False
@@ -493,31 +515,21 @@ class CrawlerService:
         self.db.add(post)
         self.db.flush()
 
-        # AI 판단(요약/중요도) 생성
-        # - auto_publish 여부는 "trusted/published로 올릴지"만 결정한다.
-        if self.ai_judge_on_crawl:
-            from app.services.ai_service import AIService
-
+        if evaluation:
+            imp_raw = evaluation.get("importance", "medium")
             try:
-                ai = AIService(self.db).summarize_post(post.id, source.organization_id)
-                # AIService가 importance를 DB에 저장하지만, 현재 post 인스턴스엔 반영이 안될 수 있어
-                # 판단 로직은 ai.importance 결과로 수행한다.
-                importance: Importance = ai.importance
-                post.importance = importance
-
-                # Mock/Gemini 모두 중요도(high/medium/low)를 반환한다고 가정
-                if (
-                    allow_auto_publish
-                    and source.auto_publish
-                    and importance in (Importance.high, Importance.medium)
-                ):
-                    post.board_type = BoardType.trusted
-                    post.status = PostStatus.published
-                else:
-                    post.board_type = BoardType.discovery
-                    post.status = PostStatus.pending
-            except Exception:
-                # LLM 실패 시에는 "보류"로 남긴다.
+                post.importance = Importance(imp_raw)
+            except ValueError:
+                post.importance = Importance.medium
+            self._attach_discovery_ai_output(post, evaluation)
+            if (
+                allow_auto_publish
+                and source.auto_publish
+                and post.importance in (Importance.high, Importance.medium)
+            ):
+                post.board_type = BoardType.trusted
+                post.status = PostStatus.published
+            else:
                 post.board_type = BoardType.discovery
                 post.status = PostStatus.pending
 
