@@ -254,8 +254,11 @@ class CrawlerService:
             return False, "content_short"
 
         if not passes_keyword_gate(title, content, url):
-            logger.debug("Discovery keyword gate rejected: %s", title[:80])
-            return False, "site_junk"
+            from app.services.ev_relevance import is_weak_topic_only
+
+            reason = "weak_topic_only" if is_weak_topic_only(title, content, url) else "ai_topic_mismatch"
+            logger.debug("Discovery keyword gate rejected (%s): %s", reason, title[:80])
+            return False, reason
 
         if stats.billing_depleted:
             stats.add("ai_billing_depleted")
@@ -479,7 +482,7 @@ class CrawlerService:
 
         if not passes_keyword_gate(title, content, url or ""):
             logger.debug("Crawl keyword gate rejected: %s", title[:80])
-            return False
+            return False  # skipped without detailed reason in regular crawl stats
 
         evaluation: dict | None = None
         if self.ai_judge_on_crawl:

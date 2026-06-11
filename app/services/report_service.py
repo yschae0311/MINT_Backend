@@ -134,49 +134,96 @@ class ReportService:
         ]
         client = get_llm_client()
         result = client.generate_daily_report(payload)
+        normalized = self._normalize_report_result(result, target)
 
         report = DailyReport(
             organization_id=organization_id,
             report_date=target,
-            title=result.get("title", f"Daily Report {target}"),
-            summary=result.get("summary", ""),
-            key_changes=result.get("key_changes"),
-            risks=result.get("risks"),
-            action_items=result.get("action_items"),
+            title=normalized["title"],
+            summary=normalized["summary"],
+            key_changes=normalized["key_changes"],
+            risks=normalized.get("risks"),
+            action_items=normalized.get("action_items"),
             model=getattr(client, "report_model", "mock"),
-            prompt_version="v1",
+            prompt_version="v2",
         )
         self.db.add(report)
         self.db.flush()
 
-        related_ids = set()
-        for change in result.get("key_changes") or []:
+        posts_by_id = {str(p.id): p for p in ordered}
+        related_ids: list[str] = []
+        rec_by_post: dict[str, str] = {}
+        for change in normalized["key_changes"]:
+            why = (change.get("description") or "").strip()
             for pid in change.get("related_post_ids") or []:
-                related_ids.add(str(pid))
+                pid_str = str(pid)
+                if pid_str not in related_ids:
+                    related_ids.append(pid_str)
+                if why and pid_str not in rec_by_post:
+                    rec_by_post[pid_str] = why
 
         item_posts: list[Post] = []
-        for post in ordered:
-            if str(post.id) in related_ids:
+        for pid in related_ids:
+            post = posts_by_id.get(pid)
+            if post and post not in item_posts:
                 item_posts.append(post)
         for post in ordered:
             if post.importance == Importance.high and post not in item_posts:
                 item_posts.append(post)
         if not item_posts:
-            item_posts = ordered[:15]
+            item_posts = ordered[:10]
 
-        for post in item_posts[:30]:
+        for post in item_posts[:20]:
             board_label = "중요" if post.board_type == BoardType.trusted else "AI발견"
+            why = rec_by_post.get(str(post.id))
+            reason = f"[{board_label}] {why}" if why else f"[{board_label}] {post.title[:120]}"
             self.db.add(
                 DailyReportItem(
                     report_id=report.id,
                     post_id=post.id,
-                    reason=f"[{board_label}] {post.title[:180]}",
+                    reason=reason[:200],
                     importance=post.importance if post.importance != Importance.unknown else Importance.medium,
                 )
             )
 
         self.db.commit()
         return self.get_report(report.id, organization_id)
+
+    def _normalize_report_result(self, result: dict, target: date) -> dict:
+        recs = result.get("recommendations") or result.get("key_changes") or []
+        key_changes = []
+        for rec in recs[:8]:
+            why = (rec.get("why_read") or rec.get("description") or "").strip()
+            key_changes.append(
+                {
+                    "title": (rec.get("title") or "").strip()[:120],
+                    "description": why[:200],
+                    "related_post_ids": rec.get("related_post_ids") or [],
+                    "importance": rec.get("importance") or "medium",
+                }
+            )
+
+        risks = result.get("risks")
+        if isinstance(risks, list):
+            risks = [r.strip() for r in risks if isinstance(r, str) and r.strip()][:2] or None
+        else:
+            risks = None
+
+        action_items = result.get("action_items")
+        if isinstance(action_items, list):
+            action_items = [a.strip() for a in action_items if isinstance(a, str) and a.strip()][:2] or None
+        else:
+            action_items = None
+
+        title = (result.get("title") or f"MINT 브리핑 · {target.isoformat()}").strip()
+        summary = (result.get("summary") or "").strip()[:400]
+        return {
+            "title": title,
+            "summary": summary,
+            "key_changes": key_changes,
+            "risks": risks,
+            "action_items": action_items,
+        }
 
     def _create_empty_report(self, organization_id: UUID, target: date) -> DailyReportDetail:
         report = DailyReport(

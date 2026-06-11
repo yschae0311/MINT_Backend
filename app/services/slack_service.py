@@ -6,13 +6,17 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.crypto import decrypt_text, encrypt_text
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.daily_report import DailyReport
 from app.models.enums import ChannelType, NotificationStatus, SlackPurpose
 from app.models.notification_log import NotificationLog
+from app.models.post import Post
 from app.models.slack_webhook import SlackWebhook
 from app.schemas.slack import SlackTestResponse, SlackWebhookCreate, SlackWebhookRead, SlackWebhookUpdate
+
+_IMPORTANCE_LABEL = {"high": "🔴 즉시", "medium": "🟡 참고", "low": "⚪ 여유"}
 
 
 class SlackService:
@@ -61,18 +65,15 @@ class SlackService:
 
     def send_test(self, organization_id: UUID, message: str) -> SlackTestResponse:
         webhook = self._active_webhook(organization_id, SlackPurpose.all)
-        ok, err = self._post_message(webhook, message)
+        ok, err = self._post_message(webhook, {"text": message})
         self._log(organization_id, webhook.channel_name, message, ok, err)
         return SlackTestResponse(success=ok, message=err or "Sent successfully")
 
     def send_no_changes(self, organization_id: UUID, report_date: date) -> SlackTestResponse:
         webhook = self._active_webhook(organization_id, SlackPurpose.daily)
-        text = (
-            f"*MINT 일일 리포트 ({report_date.isoformat()})*\n"
-            "모니터링 대상 소스를 확인했으나, 오늘은 새로운 변화가 없습니다."
-        )
-        ok, err = self._post_message(webhook, text)
-        self._log(organization_id, webhook.channel_name, text, ok, err)
+        payload = self._format_no_changes(report_date)
+        ok, err = self._post_message(webhook, payload)
+        self._log(organization_id, webhook.channel_name, payload["text"], ok, err)
         return SlackTestResponse(success=ok, message=err or "Sent successfully")
 
     def send_report(self, report_id: UUID, organization_id: UUID) -> SlackTestResponse:
@@ -80,9 +81,9 @@ class SlackService:
         if not report or report.organization_id != organization_id:
             raise NotFoundError("Report not found")
         webhook = self._active_webhook(organization_id, SlackPurpose.daily)
-        text = self._format_report(report)
-        ok, err = self._post_message(webhook, text)
-        self._log(organization_id, webhook.channel_name, text, ok, err, report_id=report.id)
+        payload = self._format_report(report)
+        ok, err = self._post_message(webhook, payload)
+        self._log(organization_id, webhook.channel_name, payload["text"], ok, err, report_id=report.id)
         if ok:
             report.slack_sent = True
             self.db.commit()
@@ -102,29 +103,149 @@ class SlackService:
             return webhooks[0]
         raise BadRequestError("No active Slack webhook configured")
 
-    def _post_message(self, webhook: SlackWebhook, text: str) -> tuple[bool, str | None]:
+    def _post_message(self, webhook: SlackWebhook, payload: dict) -> tuple[bool, str | None]:
         url = decrypt_text(webhook.webhook_url_encrypted)
         try:
             with httpx.Client(timeout=10.0) as client:
-                resp = client.post(url, json={"text": text})
+                resp = client.post(url, json=payload)
             if resp.status_code >= 400:
                 return False, resp.text
             return True, None
         except Exception as exc:
             return False, str(exc)
 
-    def _format_report(self, report: DailyReport) -> str:
-        lines = [
-            f"*{report.title}*",
-            report.summary,
-            "",
-            f"Report date: {report.report_date}",
+    def _mint_base_url(self) -> str | None:
+        origins = get_settings().cors_origin_list
+        return origins[0].rstrip("/") if origins else None
+
+    def _post_url(self, post_id: str) -> str | None:
+        base = self._mint_base_url()
+        if not base:
+            return None
+        return f"{base}/posts/{post_id}"
+
+    def _load_posts_for_report(self, report: DailyReport) -> dict[str, Post]:
+        post_ids: set[UUID] = set()
+        for rec in report.key_changes or []:
+            for pid in rec.get("related_post_ids") or []:
+                try:
+                    post_ids.add(UUID(str(pid)))
+                except (TypeError, ValueError):
+                    continue
+        posts: dict[str, Post] = {}
+        for pid in post_ids:
+            post = self.db.get(Post, pid)
+            if post:
+                posts[str(pid)] = post
+        return posts
+
+    def _format_no_changes(self, report_date: date) -> dict:
+        text = f"MINT 데일리 브리핑 ({report_date.isoformat()}) — 오늘은 새로운 변화가 없습니다."
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "🌿 MINT 데일리 브리핑", "emoji": True},
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"📅 *{report_date.isoformat()}*"}],
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "모니터링 대상 소스를 확인했으나, *오늘은 새로운 변화가 없습니다.*",
+                },
+            },
         ]
-        if report.action_items:
-            lines.append("\n*Action items:*")
-            for item in report.action_items:
-                lines.append(f"• {item}")
-        return "\n".join(lines)
+        return {"text": text, "blocks": blocks}
+
+    def _format_report(self, report: DailyReport) -> dict:
+        posts_by_id = self._load_posts_for_report(report)
+        recs = report.key_changes or []
+        fallback_lines = [report.title, report.summary or ""]
+        blocks: list[dict] = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "🌿 MINT 데일리 브리핑", "emoji": True},
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"📅 *{report.report_date.isoformat()}*"}],
+            },
+        ]
+
+        if report.summary:
+            blocks.append({"type": "divider"})
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"📌 *한눈에*\n{report.summary}"},
+                }
+            )
+
+        if recs:
+            blocks.append({"type": "divider"})
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "📰 *오늘 보면 좋은 소식*"},
+                }
+            )
+            fallback_lines.append("")
+            fallback_lines.append("오늘 보면 좋은 소식:")
+
+            for i, rec in enumerate(recs[:8], 1):
+                imp = rec.get("importance") or "medium"
+                imp_label = _IMPORTANCE_LABEL.get(imp, "•")
+                title = (rec.get("title") or "제목 없음").strip()
+                why = (rec.get("description") or "").strip()
+                related = rec.get("related_post_ids") or []
+                link_url = None
+                for pid in related:
+                    post = posts_by_id.get(str(pid))
+                    if post and post.original_url:
+                        link_url = post.original_url
+                        break
+                    mint_url = self._post_url(str(pid))
+                    if mint_url:
+                        link_url = mint_url
+
+                line = f"*{i}. {imp_label}* {title}"
+                if why:
+                    line += f"\n>{why}"
+                fallback_lines.append(f"{i}. [{imp}] {title}" + (f" — {why}" if why else ""))
+
+                section: dict = {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": line},
+                }
+                if link_url:
+                    section["accessory"] = {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "원문 보기", "emoji": True},
+                        "url": link_url,
+                        "action_id": f"report_link_{i}",
+                    }
+                blocks.append(section)
+
+        mint_base = self._mint_base_url()
+        if mint_base:
+            blocks.append({"type": "divider"})
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"<{mint_base}/reports/{report.id}|MINT에서 전체 리포트 보기>",
+                        }
+                    ],
+                }
+            )
+
+        return {"text": "\n".join(fallback_lines), "blocks": blocks}
 
     def _log(
         self,

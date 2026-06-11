@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestError
-from app.services.ev_relevance import is_obvious_junk
+from app.services.ev_relevance import is_obvious_junk, is_weak_topic_only, passes_keyword_gate
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -93,10 +93,15 @@ class GeminiClient(LLMClient):
         return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
 
     def evaluate_discovery_candidate(self, title: str, content: str, url: str) -> dict:
-        if is_obvious_junk(title, content, url):
+        if is_obvious_junk(title, content, url) or not passes_keyword_gate(title, content, url):
+            reason = (
+                "일반 에너지·친환경 키워드만 있음"
+                if is_weak_topic_only(title, content, url)
+                else "EV/충전 직접 관련 신호 없음"
+            )
             return {
                 "is_relevant": False,
-                "relevance_reason": "사이트 안내·약관 등 명백한 무관 페이지",
+                "relevance_reason": reason,
                 "summary": "",
                 "impact": "",
                 "action_items": [],
@@ -143,9 +148,7 @@ class MockLLMClient(LLMClient):
     )
 
     def _looks_ev_related(self, title: str, content: str, url: str) -> bool:
-        from app.services.ev_relevance import has_ev_hint
-
-        return not is_obvious_junk(title, content, url) and has_ev_hint(title, content, url)
+        return passes_keyword_gate(title, content, url)
 
     def summarize_post(self, title: str, content: str) -> dict:
         return {
@@ -181,19 +184,30 @@ class MockLLMClient(LLMClient):
     def generate_daily_report(self, posts: list[dict]) -> dict:
         from datetime import date
 
-        return {
-            "title": f"EV 충전 데일리 브리핑 - {date.today().isoformat()}",
-            "summary": f"총 {len(posts)}건의 게시글을 반영한 브리핑입니다.",
-            "key_changes": [
+        today = date.today().isoformat()
+        recommendations = []
+        for p in posts[:5]:
+            board = p.get("board", "trusted")
+            hint = "신규 발굴" if board == "discovery" else "핵심"
+            recommendations.append(
                 {
-                    "title": posts[0]["title"] if posts else "주요 이슈 없음",
-                    "description": "Mock 리포트 항목",
-                    "related_post_ids": [posts[0]["id"]] if posts else [],
-                    "importance": "medium",
+                    "title": p["title"][:60],
+                    "why_read": f"{hint} 이슈로 한번 확인해 보시면 좋겠습니다.",
+                    "related_post_ids": [p["id"]],
+                    "importance": p.get("importance", "medium"),
+                }
+            )
+        return {
+            "title": f"MINT 브리핑 · {today}",
+            "summary": f"오늘 {len(posts)}건 수집. EV·충전 동향을 짧게 정리했습니다.",
+            "recommendations": recommendations or [
+                {
+                    "title": "주요 이슈 없음",
+                    "why_read": "당일 수집 게시글이 없습니다.",
+                    "related_post_ids": [],
+                    "importance": "low",
                 }
             ],
-            "risks": ["외부 API 미연결 시 Mock 데이터 사용"],
-            "action_items": ["Gemini API 키 설정 후 재생성"],
         }
 
     def classify_chat_question(self, question: str) -> dict:
