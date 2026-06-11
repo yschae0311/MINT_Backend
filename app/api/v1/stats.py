@@ -136,6 +136,7 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
             id=str(latest_report_row.id),
             title=latest_report_row.title,
             report_date=latest_report_row.report_date.isoformat(),
+            summary=(latest_report_row.summary or "")[:400],
             slack_sent=latest_report_row.slack_sent,
         )
         if latest_report_row

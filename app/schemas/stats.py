@@ -21,6 +21,7 @@ class DashboardLatestReport(BaseModel):
     id: str
     title: str
     report_date: str
+    summary: str
     slack_sent: bool
 
 
