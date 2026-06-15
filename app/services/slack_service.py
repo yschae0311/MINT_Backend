@@ -6,7 +6,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.crypto import decrypt_text, encrypt_text
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.daily_report import DailyReport
@@ -115,14 +115,40 @@ class SlackService:
             return False, str(exc)
 
     def _mint_base_url(self) -> str | None:
-        origins = get_settings().cors_origin_list
-        return origins[0].rstrip("/") if origins else None
+        return get_settings().public_frontend_url
 
     def _post_url(self, post_id: str) -> str | None:
         base = self._mint_base_url()
         if not base:
             return None
         return f"{base}/posts/{post_id}"
+
+    def _report_url(self, report_id: UUID) -> str | None:
+        base = self._mint_base_url()
+        if not base:
+            return None
+        return f"{base}/reports/{report_id}"
+
+    @staticmethod
+    def _usable_original_url(url: str | None) -> str | None:
+        if not url or not url.strip():
+            return None
+        cleaned = url.strip()
+        lowered = cleaned.lower()
+        if not lowered.startswith(("http://", "https://")):
+            return None
+        if Settings._is_local_url(cleaned):
+            return None
+        return cleaned
+
+    def _recommendation_link(self, post: Post | None, post_id: str) -> tuple[str | None, str]:
+        original = self._usable_original_url(post.original_url if post else None)
+        if original:
+            return original, "원문 보기"
+        mint_url = self._post_url(post_id)
+        if mint_url:
+            return mint_url, "MINT에서 보기"
+        return None, ""
 
     def _load_posts_for_report(self, report: DailyReport) -> dict[str, Post]:
         post_ids: set[UUID] = set()
@@ -202,15 +228,16 @@ class SlackService:
                 title = (rec.get("title") or "제목 없음").strip()
                 why = (rec.get("description") or "").strip()
                 related = rec.get("related_post_ids") or []
-                link_url = None
+                link_url: str | None = None
+                link_label = "원문 보기"
                 for pid in related:
-                    post = posts_by_id.get(str(pid))
-                    if post and post.original_url:
-                        link_url = post.original_url
+                    pid_str = str(pid)
+                    post = posts_by_id.get(pid_str)
+                    url, label = self._recommendation_link(post, pid_str)
+                    if url:
+                        link_url = url
+                        link_label = label
                         break
-                    mint_url = self._post_url(str(pid))
-                    if mint_url:
-                        link_url = mint_url
 
                 line = f"*{i}. {imp_label}* {title}"
                 if why:
@@ -224,14 +251,14 @@ class SlackService:
                 if link_url:
                     section["accessory"] = {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "원문 보기", "emoji": True},
+                        "text": {"type": "plain_text", "text": link_label, "emoji": True},
                         "url": link_url,
                         "action_id": f"report_link_{i}",
                     }
                 blocks.append(section)
 
-        mint_base = self._mint_base_url()
-        if mint_base:
+        report_url = self._report_url(report.id)
+        if report_url:
             blocks.append({"type": "divider"})
             blocks.append(
                 {
@@ -239,7 +266,7 @@ class SlackService:
                     "elements": [
                         {
                             "type": "mrkdwn",
-                            "text": f"<{mint_base}/reports/{report.id}|MINT에서 전체 리포트 보기>",
+                            "text": f"<{report_url}|MINT에서 전체 리포트 보기>",
                         }
                     ],
                 }

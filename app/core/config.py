@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     slack_webhook_encryption_key: str = "change-me-32-byte-key-here!!!!"
 
     cors_origins: str = "http://localhost:5173"
+    """Public MINT web URL for Slack links etc. Falls back to first CORS origin if unset."""
+    frontend_url: str = ""
 
     seed_admin_email: str = "admin@motrexev.com"
     seed_admin_password: str = "admin1234"
@@ -35,6 +37,31 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def public_frontend_url(self) -> str | None:
+        """Slack·알림용 공개 프론트 URL. localhost는 운영 알림에 쓰지 않음."""
+        candidates: list[str] = []
+        if self.frontend_url.strip():
+            candidates.append(self.frontend_url.strip())
+        candidates.extend(self.cors_origin_list)
+
+        for raw in candidates:
+            url = raw.rstrip("/")
+            if not url:
+                continue
+            if self._is_local_url(url) and self.app_env.lower() == "production":
+                continue
+            return url
+        return None
+
+    @staticmethod
+    def _is_local_url(url: str) -> bool:
+        lowered = url.lower()
+        return any(
+            host in lowered
+            for host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+        )
 
     @property
     def is_sqlite(self) -> bool:
