@@ -145,7 +145,7 @@ class ReportService:
             risks=normalized.get("risks"),
             action_items=normalized.get("action_items"),
             model=getattr(client, "report_model", "mock"),
-            prompt_version="v2",
+            prompt_version="v3",
         )
         self.db.add(report)
         self.db.flush()

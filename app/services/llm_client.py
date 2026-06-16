@@ -192,7 +192,7 @@ class MockLLMClient(LLMClient):
             recommendations.append(
                 {
                     "title": p["title"][:60],
-                    "why_read": f"{hint} 이슈로 한번 확인해 보시면 좋겠습니다.",
+                    "why_read": f"{hint} 이슈로 내용 확인이 필요합니다.",
                     "related_post_ids": [p["id"]],
                     "importance": p.get("importance", "medium"),
                 }
