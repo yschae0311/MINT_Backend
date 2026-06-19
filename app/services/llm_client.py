@@ -264,11 +264,9 @@ class MockLLMClient(LLMClient):
         if "수집된 게시글이 없습니다" in context:
             return "MINT에 수집된 자료에서 찾지 못했습니다. 먼저 소스를 크롤링해 주세요."
         titles = [line.split("제목: ", 1)[1] for line in context.splitlines() if line.startswith("- 제목: ")]
-        refs = ", ".join(titles[:3]) if titles else "참고 자료"
         return (
             f"(Mock) '{question[:80]}'에 대한 답변입니다. "
-            f"참고 자료 {len(titles)}건을 바탕으로 EV·충전 관련 동향을 확인해 보세요.\n\n"
-            f"참고: {refs}"
+            f"MINT 수집 자료 {len(titles)}건을 바탕으로 EV·충전 관련 동향을 정리했습니다."
         )
 
 
