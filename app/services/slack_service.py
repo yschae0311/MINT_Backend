@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from datetime import date
 from uuid import UUID
+import re
 
 import httpx
 from sqlalchemy import select
@@ -16,9 +17,45 @@ from app.models.post import Post
 from app.models.slack_webhook import SlackWebhook
 from app.schemas.slack import SlackTestResponse, SlackWebhookCreate, SlackWebhookRead, SlackWebhookUpdate
 
-_IMPORTANCE_EMOJI = {"high": "🔴", "medium": "•", "low": "◦"}
-_MAX_WHY_LEN = 72
+_MAX_WHY_LEN = 96
 _MAX_RECS = 6
+_MAX_SUMMARY_LEN = 420
+_IMPORTANCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _break_sentences_for_chat(text: str) -> str:
+    """채팅 가독성을 위해 문장 단위 줄바꿈."""
+    normalized = re.sub(r"\s+", " ", text.strip())
+    if not normalized:
+        return normalized
+    broken = re.sub(r"([.!?。])(?=\S)", r"\1\n", normalized)
+    broken = re.sub(r"([.!?。])\s+", r"\1\n", broken)
+    lines = [line.strip() for line in broken.split("\n") if line.strip()]
+    return "\n".join(lines)
+
+
+def _truncate_chat_text(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    lines = text.split("\n")
+    kept: list[str] = []
+    total = 0
+    for line in lines:
+        extra = len(line) + (1 if kept else 0)
+        if total + extra > max_len:
+            break
+        kept.append(line)
+        total += extra
+    if kept:
+        result = "\n".join(kept)
+        if len(result) < len(text):
+            return result.rstrip() + "…"
+        return result
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def _indent_block(text: str, indent: str = "    ") -> str:
+    return "\n".join(f"{indent}{line}" for line in text.split("\n"))
 
 
 class SlackService:
@@ -171,13 +208,11 @@ class SlackService:
         self,
         rec: dict,
         posts_by_id: dict[str, Post],
+        index: int,
     ) -> str:
-        imp = rec.get("importance") or "medium"
-        marker = _IMPORTANCE_EMOJI.get(imp, "•")
         title = (rec.get("title") or "제목 없음").strip()
-        why = (rec.get("description") or "").strip()
-        if len(why) > _MAX_WHY_LEN:
-            why = why[: _MAX_WHY_LEN - 1].rstrip() + "…"
+        why = _break_sentences_for_chat((rec.get("description") or "").strip())
+        why = _truncate_chat_text(why, _MAX_WHY_LEN)
 
         link_url: str | None = None
         for pid in rec.get("related_post_ids") or []:
@@ -188,45 +223,36 @@ class SlackService:
                 link_url = url
                 break
 
-        title_part = f"<{link_url}|{title}>" if link_url else f"*{title}*"
-        line = f"{marker} {title_part}"
+        title_part = f"<{link_url}|{title}>" if link_url else title
         if why:
-            line += f"  — {why}"
-        return line
+            return f"{index}. {title_part}\n{_indent_block(why)}"
+        return f"{index}. {title_part}"
 
-    def _group_rec_lines(
-        self,
-        recs: list[dict],
-        posts_by_id: dict[str, Post],
-    ) -> tuple[list[str], list[str]]:
-        high_lines: list[str] = []
-        other_lines: list[str] = []
-        for rec in recs[:_MAX_RECS]:
-            line = self._format_rec_line(rec, posts_by_id)
-            if (rec.get("importance") or "medium") == "high":
-                high_lines.append(line)
-            else:
-                other_lines.append(line)
-        return high_lines, other_lines
+    def _format_rec_lines(self, recs: list[dict], posts_by_id: dict[str, Post]) -> list[str]:
+        ordered = sorted(
+            recs[: _MAX_RECS * 2],
+            key=lambda r: _IMPORTANCE_ORDER.get(r.get("importance") or "medium", 1),
+        )[:_MAX_RECS]
+        return [self._format_rec_line(rec, posts_by_id, i) for i, rec in enumerate(ordered, 1)]
 
     def _format_no_changes(self, report_date: date) -> dict:
-        text = f"MINT 데일리 브리핑 ({report_date.isoformat()}) — 오늘은 새로운 변화가 없습니다."
+        text = f"MINT 데일리 브리핑 ({report_date.isoformat()}) — 새로운 변화 없음"
         blocks = [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": "🌿 MINT 데일리 브리핑", "emoji": True},
+                "text": {"type": "plain_text", "text": "MINT 데일리 브리핑", "emoji": False},
             },
             {
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"📅 *{report_date.isoformat()}*"}],
+                "elements": [{"type": "mrkdwn", "text": report_date.isoformat()}],
             },
             {"type": "divider"},
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "모니터링 대상 소스를 확인했으나, *오늘은 새로운 변화가 없습니다.*",
-                },
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "모니터링 대상 소스를 확인했으나,\n오늘은 새로운 변화가 없습니다.",
+                    },
             },
         ]
         return {"text": text, "blocks": blocks}
@@ -234,8 +260,18 @@ class SlackService:
     def _format_report(self, report: DailyReport) -> dict:
         posts_by_id = self._load_posts_for_report(report)
         recs = report.key_changes or []
-        high_lines, other_lines = self._group_rec_lines(recs, posts_by_id)
-        fallback_lines = [report.title, report.summary or ""]
+        rec_lines = self._format_rec_lines(recs, posts_by_id)
+
+        summary = _truncate_chat_text(
+            _break_sentences_for_chat((report.summary or "").strip()),
+            _MAX_SUMMARY_LEN,
+        )
+
+        fallback_lines = [report.title]
+        if summary:
+            fallback_lines.append(summary)
+        fallback_lines.extend(rec_lines)
+
         blocks: list[dict] = [
             {
                 "type": "header",
@@ -244,75 +280,53 @@ class SlackService:
             {
                 "type": "context",
                 "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"📅 *{report.report_date.isoformat()}*  ·  {report.title}",
-                    }
+                    {"type": "mrkdwn", "text": f"📅 *{report.report_date.isoformat()}*"},
                 ],
             },
         ]
 
-        if report.summary:
+        if summary:
             blocks.append({"type": "divider"})
-            summary = report.summary.strip()
-            if len(summary) > 320:
-                summary = summary[:319].rstrip() + "…"
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"*한눈에*\n{summary}"},
+                    "text": {"type": "mrkdwn", "text": f"📌 *한눈에*\n{summary}"},
                 }
             )
 
-        if high_lines or other_lines:
+        if rec_lines:
             blocks.append({"type": "divider"})
-            fallback_lines.append("")
-
-        if high_lines:
             blocks.append(
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "*핵심*\n" + "\n".join(high_lines),
+                        "text": "*오늘의 소식*\n" + "\n".join(rec_lines),
                     },
                 }
             )
-            fallback_lines.append("핵심:")
-            fallback_lines.extend(high_lines)
-
-        if other_lines:
-            header = "*참고*" if high_lines else "*오늘의 소식*"
+        elif not summary:
+            blocks.append({"type": "divider"})
             blocks.append(
                 {
                     "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": header + "\n" + "\n".join(other_lines),
-                    },
+                    "text": {"type": "mrkdwn", "text": report.title},
                 }
             )
-            fallback_lines.append(header.strip("*") + ":")
-            fallback_lines.extend(other_lines)
 
         report_url = self._report_url(report.id)
         if report_url:
             blocks.append({"type": "divider"})
             blocks.append(
                 {
-                    "type": "actions",
+                    "type": "context",
                     "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "MINT에서 전체 보기", "emoji": True},
-                            "url": report_url,
-                            "action_id": "open_full_report",
-                        }
+                        {"type": "mrkdwn", "text": f"<{report_url}|MINT에서 전체 리포트 보기 →>"},
                     ],
                 }
             )
 
-        return {"text": "\n".join(fallback_lines), "blocks": blocks}
+        return {"text": "\n".join(line for line in fallback_lines if line), "blocks": blocks}
 
     def _log(
         self,
