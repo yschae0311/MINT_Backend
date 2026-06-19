@@ -2,10 +2,10 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.models.background_job import BackgroundJob
 from app.models.enums import JobStatus, JobType
 from app.schemas.job import JobRead
@@ -13,8 +13,20 @@ from app.schemas.job import JobRead
 logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = (JobStatus.pending, JobStatus.running)
+FINISHED_STATUSES = (JobStatus.success, JobStatus.failed, JobStatus.cancelled)
 
 BUSY_MESSAGE = "이미 진행 중인 작업이 있습니다. 작업 패널에서 완료를 확인한 후 다시 시도해 주세요."
+
+
+def _revoke_celery_task(celery_task_id: str | None) -> None:
+    if not celery_task_id:
+        return
+    try:
+        from app.workers.celery_app import celery_app
+
+        celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
+    except Exception as exc:
+        logger.warning("Failed to revoke celery task %s: %s", celery_task_id, exc)
 
 
 class JobService:
@@ -44,9 +56,15 @@ class JobService:
 
     def start_job(self, job_id: UUID) -> None:
         job = self._get(job_id)
+        if job.status == JobStatus.cancelled:
+            return
         job.status = JobStatus.running
         job.started_at = datetime.now(timezone.utc)
         self.db.commit()
+
+    def is_cancelled(self, job_id: UUID) -> bool:
+        job = self._get(job_id)
+        return job.status == JobStatus.cancelled
 
     def update_progress(
         self,
@@ -65,6 +83,8 @@ class JobService:
 
     def complete_job(self, job_id: UUID, result_message: str) -> None:
         job = self._get(job_id)
+        if job.status == JobStatus.cancelled:
+            return
         job.status = JobStatus.success
         job.result_message = result_message
         job.finished_at = datetime.now(timezone.utc)
@@ -74,6 +94,8 @@ class JobService:
 
     def fail_job(self, job_id: UUID, error: str) -> None:
         job = self._get(job_id)
+        if job.status == JobStatus.cancelled:
+            return
         job.status = JobStatus.failed
         job.error = error[:4000]
         job.finished_at = datetime.now(timezone.utc)
@@ -128,6 +150,46 @@ class JobService:
         if not job:
             raise NotFoundError("Job not found")
         return JobRead.model_validate(job)
+
+    def cancel_job(self, job_id: UUID, organization_id: UUID) -> JobRead:
+        job = self._get_org_job(job_id, organization_id)
+        if job.status not in ACTIVE_STATUSES:
+            raise BadRequestError("취소할 수 없는 작업입니다. (이미 완료·실패·취소됨)")
+        job.status = JobStatus.cancelled
+        job.finished_at = datetime.now(timezone.utc)
+        job.progress_message = "취소됨"
+        job.result_message = "사용자에 의해 취소됨"
+        _revoke_celery_task(job.celery_task_id)
+        self.db.commit()
+        return JobRead.model_validate(job)
+
+    def delete_job(self, job_id: UUID, organization_id: UUID) -> None:
+        job = self._get_org_job(job_id, organization_id)
+        if job.status in ACTIVE_STATUSES:
+            raise BadRequestError("진행 중인 작업은 먼저 취소해 주세요.")
+        self.db.delete(job)
+        self.db.commit()
+
+    def clear_finished_jobs(self, organization_id: UUID) -> int:
+        result = self.db.execute(
+            delete(BackgroundJob).where(
+                BackgroundJob.organization_id == organization_id,
+                BackgroundJob.status.in_(FINISHED_STATUSES),
+            )
+        )
+        self.db.commit()
+        return result.rowcount or 0
+
+    def _get_org_job(self, job_id: UUID, organization_id: UUID) -> BackgroundJob:
+        job = self.db.scalar(
+            select(BackgroundJob).where(
+                BackgroundJob.id == job_id,
+                BackgroundJob.organization_id == organization_id,
+            )
+        )
+        if not job:
+            raise NotFoundError("Job not found")
+        return job
 
     def _get(self, job_id: UUID) -> BackgroundJob:
         job = self.db.get(BackgroundJob, job_id)

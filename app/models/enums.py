@@ -89,3 +89,4 @@ class JobStatus(str, enum.Enum):
     running = "running"
     success = "success"
     failed = "failed"
+    cancelled = "cancelled"

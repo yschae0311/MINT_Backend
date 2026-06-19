@@ -47,6 +47,8 @@ def _run_crawl_all(
     stats = CrawlSkipStats()
     failed = 0
     for i, source in enumerate(sources, start=1):
+        if jobs.is_cancelled(job_id):
+            return "사용자에 의해 취소됨"
         jobs.update_progress(job_id, i - 1, total, f"{i}/{total} · {source.name}")
         result = crawler._crawl_source_safe(source, organization_id, to_discovery=to_discovery)
         created_sum += result.created
@@ -68,6 +70,8 @@ def crawl_source_job_task(job_id: str, source_id: str, organization_id: str, to_
     try:
         jobs = JobService(db)
         jobs.start_job(UUID(job_id))
+        if jobs.is_cancelled(UUID(job_id)):
+            return
         jobs.update_progress(UUID(job_id), 0, 1, "크롤링 중…")
         crawler = CrawlerService(db)
         if to_discovery:
@@ -77,6 +81,8 @@ def crawl_source_job_task(job_id: str, source_id: str, organization_id: str, to_
         msg = result.message or f"created {result.created}, skipped {result.skipped}"
         if result.error:
             jobs.fail_job(UUID(job_id), result.error)
+        elif jobs.is_cancelled(UUID(job_id)):
+            return
         else:
             jobs.complete_job(UUID(job_id), msg)
     except Exception as exc:
@@ -92,6 +98,8 @@ def crawl_all_discovery_job_task(job_id: str, organization_id: str, trusted_only
     try:
         jobs = JobService(db)
         jobs.start_job(UUID(job_id))
+        if jobs.is_cancelled(UUID(job_id)):
+            return
         msg = _run_crawl_all(
             db,
             jobs,
@@ -100,6 +108,8 @@ def crawl_all_discovery_job_task(job_id: str, organization_id: str, trusted_only
             to_discovery=True,
             trusted_only=trusted_only,
         )
+        if jobs.is_cancelled(UUID(job_id)):
+            return
         jobs.complete_job(UUID(job_id), msg)
     except Exception as exc:
         logger.exception("crawl_all_discovery_job_task failed job=%s", job_id)
@@ -114,6 +124,8 @@ def generate_report_job_task(job_id: str, organization_id: str, report_date: str
     try:
         jobs = JobService(db)
         jobs.start_job(UUID(job_id))
+        if jobs.is_cancelled(UUID(job_id)):
+            return
         jobs.update_progress(UUID(job_id), 0, 1, "리포트 생성 중…")
         target = date.fromisoformat(report_date) if report_date else _kst_today()
         report = ReportService(db).generate(
@@ -122,6 +134,8 @@ def generate_report_job_task(job_id: str, organization_id: str, report_date: str
             prefer_yesterday=False,
             allow_empty=True,
         )
+        if jobs.is_cancelled(UUID(job_id)):
+            return
         jobs.complete_job(UUID(job_id), f"리포트 생성 완료 ({report.report_date})")
     except Exception as exc:
         logger.exception("generate_report_job_task failed job=%s", job_id)

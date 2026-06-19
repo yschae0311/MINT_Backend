@@ -1,6 +1,8 @@
 from datetime import datetime
 from uuid import UUID
 
+from pydantic import BaseModel
+
 from app.models.enums import JobStatus, JobType
 from app.schemas.common import ORMBase
 
@@ -20,3 +22,7 @@ class JobRead(ORMBase):
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+
+
+class JobClearResponse(BaseModel):
+    deleted: int
