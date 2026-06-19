@@ -20,6 +20,7 @@ MotrexEV EV 충전·CSMS·CPO 팀을 위한 **간결한** 데일리 브리핑 �
   - title: 원문 제목을 짧게 다듬기 (40자 내외).
   - why_read: 추천·검토 사유 **한 줄** (60자 내외). 객관적·사무적 표현.
   - importance: high(즉시 확인) | medium(참고) | low(여유 시)
+  - **high는 전체 추천의 1~2건 이하**로만 부여하세요. 대부분은 medium, 여유 있는 항목은 low.
 - risks, action_items는 **생략**하거나 정말 필요할 때만 1건 이하.
 - 추측은 why_read에 "(추측)" 표기.
 - related_post_ids는 입력 id만 사용.

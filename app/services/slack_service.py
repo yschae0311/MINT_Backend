@@ -16,7 +16,9 @@ from app.models.post import Post
 from app.models.slack_webhook import SlackWebhook
 from app.schemas.slack import SlackTestResponse, SlackWebhookCreate, SlackWebhookRead, SlackWebhookUpdate
 
-_IMPORTANCE_LABEL = {"high": "즉시", "medium": "참고", "low": "여유"}
+_IMPORTANCE_EMOJI = {"high": "🔴", "medium": "•", "low": "◦"}
+_MAX_WHY_LEN = 72
+_MAX_RECS = 6
 
 
 class SlackService:
@@ -165,6 +167,48 @@ class SlackService:
                 posts[str(pid)] = post
         return posts
 
+    def _format_rec_line(
+        self,
+        rec: dict,
+        posts_by_id: dict[str, Post],
+    ) -> str:
+        imp = rec.get("importance") or "medium"
+        marker = _IMPORTANCE_EMOJI.get(imp, "•")
+        title = (rec.get("title") or "제목 없음").strip()
+        why = (rec.get("description") or "").strip()
+        if len(why) > _MAX_WHY_LEN:
+            why = why[: _MAX_WHY_LEN - 1].rstrip() + "…"
+
+        link_url: str | None = None
+        for pid in rec.get("related_post_ids") or []:
+            pid_str = str(pid)
+            post = posts_by_id.get(pid_str)
+            url, _ = self._recommendation_link(post, pid_str)
+            if url:
+                link_url = url
+                break
+
+        title_part = f"<{link_url}|{title}>" if link_url else f"*{title}*"
+        line = f"{marker} {title_part}"
+        if why:
+            line += f"  — {why}"
+        return line
+
+    def _group_rec_lines(
+        self,
+        recs: list[dict],
+        posts_by_id: dict[str, Post],
+    ) -> tuple[list[str], list[str]]:
+        high_lines: list[str] = []
+        other_lines: list[str] = []
+        for rec in recs[:_MAX_RECS]:
+            line = self._format_rec_line(rec, posts_by_id)
+            if (rec.get("importance") or "medium") == "high":
+                high_lines.append(line)
+            else:
+                other_lines.append(line)
+        return high_lines, other_lines
+
     def _format_no_changes(self, report_date: date) -> dict:
         text = f"MINT 데일리 브리핑 ({report_date.isoformat()}) — 오늘은 새로운 변화가 없습니다."
         blocks = [
@@ -190,6 +234,7 @@ class SlackService:
     def _format_report(self, report: DailyReport) -> dict:
         posts_by_id = self._load_posts_for_report(report)
         recs = report.key_changes or []
+        high_lines, other_lines = self._group_rec_lines(recs, posts_by_id)
         fallback_lines = [report.title, report.summary or ""]
         blocks: list[dict] = [
             {
@@ -198,75 +243,70 @@ class SlackService:
             },
             {
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"📅 *{report.report_date.isoformat()}*"}],
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"📅 *{report.report_date.isoformat()}*  ·  {report.title}",
+                    }
+                ],
             },
         ]
 
         if report.summary:
             blocks.append({"type": "divider"})
+            summary = report.summary.strip()
+            if len(summary) > 320:
+                summary = summary[:319].rstrip() + "…"
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"📌 *한눈에*\n{report.summary}"},
+                    "text": {"type": "mrkdwn", "text": f"*한눈에*\n{summary}"},
                 }
             )
 
-        if recs:
+        if high_lines or other_lines:
             blocks.append({"type": "divider"})
+            fallback_lines.append("")
+
+        if high_lines:
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "📰 *오늘 보면 좋은 소식*"},
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*핵심*\n" + "\n".join(high_lines),
+                    },
                 }
             )
-            fallback_lines.append("")
-            fallback_lines.append("오늘 보면 좋은 소식:")
+            fallback_lines.append("핵심:")
+            fallback_lines.extend(high_lines)
 
-            for i, rec in enumerate(recs[:8], 1):
-                imp = rec.get("importance") or "medium"
-                imp_label = _IMPORTANCE_LABEL.get(imp, "•")
-                title = (rec.get("title") or "제목 없음").strip()
-                why = (rec.get("description") or "").strip()
-                related = rec.get("related_post_ids") or []
-                link_url: str | None = None
-                link_label = "원문 보기"
-                for pid in related:
-                    pid_str = str(pid)
-                    post = posts_by_id.get(pid_str)
-                    url, label = self._recommendation_link(post, pid_str)
-                    if url:
-                        link_url = url
-                        link_label = label
-                        break
-
-                line = f"*{i}. {imp_label}* {title}"
-                if why:
-                    line += f"\n>{why}"
-                fallback_lines.append(f"{i}. [{imp}] {title}" + (f" — {why}" if why else ""))
-
-                section: dict = {
+        if other_lines:
+            header = "*참고*" if high_lines else "*오늘의 소식*"
+            blocks.append(
+                {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": line},
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": header + "\n" + "\n".join(other_lines),
+                    },
                 }
-                if link_url:
-                    section["accessory"] = {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": link_label, "emoji": True},
-                        "url": link_url,
-                        "action_id": f"report_link_{i}",
-                    }
-                blocks.append(section)
+            )
+            fallback_lines.append(header.strip("*") + ":")
+            fallback_lines.extend(other_lines)
 
         report_url = self._report_url(report.id)
         if report_url:
             blocks.append({"type": "divider"})
             blocks.append(
                 {
-                    "type": "context",
+                    "type": "actions",
                     "elements": [
                         {
-                            "type": "mrkdwn",
-                            "text": f"<{report_url}|MINT에서 전체 리포트 보기>",
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "MINT에서 전체 보기", "emoji": True},
+                            "url": report_url,
+                            "action_id": "open_full_report",
                         }
                     ],
                 }
