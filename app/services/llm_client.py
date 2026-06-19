@@ -1,6 +1,7 @@
 import json
 import re
 from abc import ABC, abstractmethod
+from datetime import date
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -43,7 +44,7 @@ class LLMClient(ABC):
         ...
 
     @abstractmethod
-    def generate_daily_report(self, posts: list[dict]) -> dict:
+    def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
         ...
 
     @abstractmethod
@@ -112,9 +113,12 @@ class GeminiClient(LLMClient):
         user = f"URL: {url}\nTitle: {title}\n\nContent:\n{content[:12000]}"
         return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
 
-    def generate_daily_report(self, posts: list[dict]) -> dict:
+    def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
         system = _load_prompt("daily_report_v1.md")
-        user = json.dumps({"posts": posts}, ensure_ascii=False)
+        user = json.dumps(
+            {"report_date": report_date.isoformat(), "posts": posts},
+            ensure_ascii=False,
+        )
         return _parse_json(self._generate(self.report_model, system, user, json_mode=True))
 
     def answer_question(self, question: str, context: str) -> str:
@@ -181,10 +185,7 @@ class MockLLMClient(LLMClient):
             "confidence": 0.7,
         }
 
-    def generate_daily_report(self, posts: list[dict]) -> dict:
-        from datetime import date
-
-        today = date.today().isoformat()
+    def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
         recommendations = []
         for p in posts[:5]:
             board = p.get("board", "trusted")
@@ -198,8 +199,7 @@ class MockLLMClient(LLMClient):
                 }
             )
         return {
-            "title": f"MINT 브리핑 · {today}",
-            "summary": f"오늘 {len(posts)}건 수집. EV·충전 동향을 짧게 정리했습니다.",
+            "summary": f"{report_date.isoformat()} 기준 {len(posts)}건 수집. EV·충전 동향을 짧게 정리했습니다.",
             "recommendations": recommendations or [
                 {
                     "title": "주요 이슈 없음",

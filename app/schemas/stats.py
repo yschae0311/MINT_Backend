@@ -17,12 +17,19 @@ class DashboardPostPreview(BaseModel):
     ai_summary: str | None = None
 
 
+class DashboardReportHighlight(BaseModel):
+    title: str
+    description: str | None = None
+    importance: str | None = None
+
+
 class DashboardLatestReport(BaseModel):
     id: str
     title: str
     report_date: str
     summary: str
     slack_sent: bool
+    highlights: list[DashboardReportHighlight] = []
 
 
 class DashboardStatsResponse(BaseModel):

@@ -16,7 +16,7 @@ from app.models.post import Post
 from app.models.slack_webhook import SlackWebhook
 from app.schemas.slack import SlackTestResponse, SlackWebhookCreate, SlackWebhookRead, SlackWebhookUpdate
 
-_IMPORTANCE_LABEL = {"high": "🔴 즉시", "medium": "🟡 참고", "low": "⚪ 여유"}
+_IMPORTANCE_LABEL = {"high": "즉시", "medium": "참고", "low": "여유"}
 
 
 class SlackService:

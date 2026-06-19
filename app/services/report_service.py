@@ -16,6 +16,10 @@ from app.services.llm_client import get_llm_client
 KST = ZoneInfo("Asia/Seoul")
 
 
+def format_report_title(report_date: date) -> str:
+    return f"MINT 브리핑 · {report_date.isoformat()}"
+
+
 class ReportService:
     def __init__(self, db: Session):
         self.db = db
@@ -133,7 +137,7 @@ class ReportService:
             for p in ordered[:40]
         ]
         client = get_llm_client()
-        result = client.generate_daily_report(payload)
+        result = client.generate_daily_report(payload, target)
         normalized = self._normalize_report_result(result, target)
 
         report = DailyReport(
@@ -215,10 +219,9 @@ class ReportService:
         else:
             action_items = None
 
-        title = (result.get("title") or f"MINT 브리핑 · {target.isoformat()}").strip()
         summary = (result.get("summary") or "").strip()[:400]
         return {
-            "title": title,
+            "title": format_report_title(target),
             "summary": summary,
             "key_changes": key_changes,
             "risks": risks,
@@ -229,7 +232,7 @@ class ReportService:
         report = DailyReport(
             organization_id=organization_id,
             report_date=target,
-            title=f"MINT 일일 리포트 ({target.isoformat()})",
+            title=format_report_title(target),
             summary="모니터링 대상 소스를 확인했으나, 오늘은 새로운 변화가 없습니다.",
             model="none",
             prompt_version="v1",

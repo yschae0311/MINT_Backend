@@ -13,7 +13,12 @@ from app.models.enums import BoardType, Importance, PostStatus
 from app.models.post import Post
 from app.models.source import Source
 from app.models.user import User
-from app.schemas.stats import DashboardLatestReport, DashboardPostPreview, DashboardStatsResponse
+from app.schemas.stats import (
+    DashboardLatestReport,
+    DashboardPostPreview,
+    DashboardReportHighlight,
+    DashboardStatsResponse,
+)
 from app.services.post_service import PostService
 
 router = APIRouter()
@@ -131,17 +136,30 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
         .order_by(DailyReport.report_date.desc())
         .limit(1)
     )
-    latest_report = (
-        DashboardLatestReport(
+    latest_report = None
+    if latest_report_row:
+        highlights: list[DashboardReportHighlight] = []
+        for item in (latest_report_row.key_changes or [])[:6]:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("title") or "").strip()
+            if not title:
+                continue
+            highlights.append(
+                DashboardReportHighlight(
+                    title=title[:120],
+                    description=(item.get("description") or "").strip()[:200] or None,
+                    importance=item.get("importance"),
+                )
+            )
+        latest_report = DashboardLatestReport(
             id=str(latest_report_row.id),
             title=latest_report_row.title,
             report_date=latest_report_row.report_date.isoformat(),
-            summary=(latest_report_row.summary or "")[:400],
+            summary=(latest_report_row.summary or "")[:500],
             slack_sent=latest_report_row.slack_sent,
+            highlights=highlights,
         )
-        if latest_report_row
-        else None
-    )
 
     return DashboardStatsResponse(
         new_today=new_today,
@@ -151,8 +169,8 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
         active_sources=active_sources,
         total_sources=total_sources,
         latest_report=latest_report,
-        trusted_preview=_recent_posts(db, org_id, board_type=BoardType.trusted, limit=5),
+        trusted_preview=_recent_posts(db, org_id, board_type=BoardType.trusted, limit=8),
         discovery_preview=_recent_posts(
-            db, org_id, board_type=BoardType.discovery, status=PostStatus.pending, limit=5
+            db, org_id, board_type=BoardType.discovery, status=PostStatus.pending, limit=4
         ),
     )
