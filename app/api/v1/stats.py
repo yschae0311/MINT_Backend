@@ -19,6 +19,7 @@ from app.schemas.stats import (
     DashboardReportHighlight,
     DashboardStatsResponse,
 )
+from app.services.org_settings_service import OrgSettingsService
 from app.services.post_service import PostService
 
 router = APIRouter()
@@ -158,6 +159,7 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
             report_date=latest_report_row.report_date.isoformat(),
             summary=(latest_report_row.summary or "")[:500],
             slack_sent=latest_report_row.slack_sent,
+            illustration_url=latest_report_row.illustration_url,
             highlights=highlights,
         )
 
@@ -168,6 +170,7 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
         high_importance=high_importance,
         active_sources=active_sources,
         total_sources=total_sources,
+        discovery_pending_retention_days=OrgSettingsService(db).discovery_pending_retention_days(org_id),
         latest_report=latest_report,
         trusted_preview=_recent_posts(db, org_id, board_type=BoardType.trusted, limit=8),
         discovery_preview=_recent_posts(

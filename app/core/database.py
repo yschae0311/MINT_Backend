@@ -43,7 +43,32 @@ def _migrate_pg_columns() -> None:
                 "ALTER COLUMN status TYPE VARCHAR(16)"
             )
         )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".organizations '
+                "ADD COLUMN IF NOT EXISTS discovery_pending_retention_days INTEGER"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".daily_reports '
+                "ADD COLUMN IF NOT EXISTS illustration_url VARCHAR(512)"
+            )
+        )
     logger.debug('Ensured background_jobs.status column width')
+
+
+def _migrate_sqlite_columns() -> None:
+    if not settings.is_sqlite:
+        return
+    inspector = inspect(engine)
+    if "daily_reports" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("daily_reports")}
+    if "illustration_url" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE daily_reports ADD COLUMN illustration_url VARCHAR(512)"))
+        logger.info("Added daily_reports.illustration_url column (sqlite)")
 
 
 def init_db() -> None:
@@ -56,13 +81,15 @@ def init_db() -> None:
         inspector.get_table_names(schema=_schema) if _schema else inspector.get_table_names()
     )
     Base.metadata.create_all(bind=engine)
-    if "background_jobs" in existing or "background_jobs" in {
-        t.name for t in Base.metadata.sorted_tables
-    }:
+    if existing:
         try:
             _migrate_pg_columns()
         except Exception as exc:
-            logger.debug("background_jobs column migration skipped: %s", exc)
+            logger.debug("PostgreSQL column migration skipped: %s", exc)
+        try:
+            _migrate_sqlite_columns()
+        except Exception as exc:
+            logger.debug("SQLite column migration skipped: %s", exc)
     created = [t.name for t in Base.metadata.sorted_tables if t.name not in existing]
     if created:
         loc = f'{_schema}.' if _schema else ""

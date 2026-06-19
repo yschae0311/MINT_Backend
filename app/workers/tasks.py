@@ -171,20 +171,20 @@ def crawl_all_sources_task():
 
 @celery_app.task(name="app.workers.tasks.purge_stale_discovery_posts_task")
 def purge_stale_discovery_posts_task(retention_days: int | None = None):
-    from app.core.config import get_settings
-
-    days = (
-        retention_days
-        if retention_days is not None
-        else get_settings().discovery_pending_retention_days
-    )
-    if days <= 0:
-        logger.info("purge_stale_discovery skipped (retention_days=%s)", days)
-        return
+    from app.services.org_settings_service import OrgSettingsService
 
     db = SessionLocal()
     try:
         for org in db.scalars(select(Organization)).all():
+            days = (
+                retention_days
+                if retention_days is not None
+                else OrgSettingsService(db).discovery_pending_retention_days(org.id)
+            )
+            if days <= 0:
+                logger.info("purge_stale_discovery skipped org=%s (retention_days=%s)", org.id, days)
+                continue
+
             jobs = JobService(db)
             job = jobs.create_job(
                 org.id,

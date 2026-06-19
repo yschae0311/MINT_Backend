@@ -5,7 +5,6 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.models.ai_output import AIOutput
 from app.models.enums import BoardType, CreatedBy, PostStatus
@@ -159,11 +158,12 @@ class PostService:
         *,
         retention_days: int | None = None,
     ) -> int:
-        days = (
-            retention_days
-            if retention_days is not None
-            else get_settings().discovery_pending_retention_days
-        )
+        if retention_days is None:
+            from app.services.org_settings_service import OrgSettingsService
+
+            days = OrgSettingsService(self.db).discovery_pending_retention_days(organization_id)
+        else:
+            days = retention_days
         if days <= 0:
             return 0
 

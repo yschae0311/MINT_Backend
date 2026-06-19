@@ -65,3 +65,13 @@ class CrawlResult(BaseModel):
     error: str | None = None
     skip_reasons: dict[str, int] = Field(default_factory=dict)
     error_sample: str | None = None
+
+
+class CollectionSettingsRead(BaseModel):
+    discovery_pending_retention_days: int
+    default_retention_days: int
+    is_custom: bool
+
+
+class CollectionSettingsUpdate(BaseModel):
+    discovery_pending_retention_days: int = Field(ge=0, le=365)

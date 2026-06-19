@@ -26,6 +26,7 @@ class DailyReport(Base):
     model: Mapped[str] = mapped_column(String(128), default="")
     prompt_version: Mapped[str] = mapped_column(String(32), default="v1")
     slack_sent: Mapped[bool] = mapped_column(default=False)
+    illustration_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

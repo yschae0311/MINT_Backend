@@ -10,12 +10,36 @@ from app.models.enums import JobType
 from app.models.source import Source
 from app.models.user import User
 from app.schemas.job import JobRead
-from app.schemas.source import SourceCreate, SourceRead, SourceUpdate
+from app.schemas.source import (
+    CollectionSettingsRead,
+    CollectionSettingsUpdate,
+    SourceCreate,
+    SourceRead,
+    SourceUpdate,
+)
 from app.services.job_service import JobService, dispatch_task
+from app.services.org_settings_service import OrgSettingsService
 from app.services.source_service import SourceService
 from app.workers.tasks import crawl_all_discovery_job_task, crawl_source_job_task
 
 router = APIRouter()
+
+
+@router.get("/collection-settings", response_model=CollectionSettingsRead)
+def get_collection_settings(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return OrgSettingsService(db).get_collection_settings(user.organization_id)
+
+
+@router.patch("/collection-settings", response_model=CollectionSettingsRead)
+def update_collection_settings(
+    data: CollectionSettingsUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return OrgSettingsService(db).update_collection_settings(
+        user.organization_id,
+        discovery_pending_retention_days=data.discovery_pending_retention_days,
+    )
 
 
 @router.get("", response_model=list[SourceRead])

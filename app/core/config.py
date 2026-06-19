@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_summary_model: str = "gemini-2.5-flash-lite"
     gemini_report_model: str = "gemini-2.5-flash"
+    gemini_image_model: str = "gemini-2.0-flash-preview-image-generation"
+    report_illustration_enabled: bool = True
+
+    media_root: str = "uploads"
+    media_url_prefix: str = "/media"
 
     slack_webhook_encryption_key: str = "change-me-32-byte-key-here!!!!"
 

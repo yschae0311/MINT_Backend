@@ -49,6 +49,12 @@ class LLMClient(ABC):
         ...
 
     @abstractmethod
+    def generate_report_illustration_scene(
+        self, summary: str, highlights: list[dict], report_date: date
+    ) -> str:
+        ...
+
+    @abstractmethod
     def answer_question(self, question: str, context: str) -> str:
         ...
 
@@ -156,6 +162,30 @@ class GeminiClient(LLMClient):
             list_fields=(),
         )
 
+    def generate_report_illustration_scene(
+        self, summary: str, highlights: list[dict], report_date: date
+    ) -> str:
+        system = _load_prompt("report_illustration_v1.md")
+        user = json.dumps(
+            {
+                "report_date": report_date.isoformat(),
+                "summary": summary[:400],
+                "highlights": [
+                    {
+                        "title": (h.get("title") or "")[:80],
+                        "description": (h.get("description") or h.get("why_read") or "")[:120],
+                    }
+                    for h in highlights[:4]
+                ],
+            },
+            ensure_ascii=False,
+        )
+        result = _parse_json(self._generate(self.report_model, system, user, json_mode=True))
+        scene = (result.get("scene") or "").strip()
+        if not scene:
+            raise BadRequestError("Gemini returned empty illustration scene")
+        return scene[:500]
+
     def answer_question(self, question: str, context: str) -> str:
         system = _load_prompt("chat_assistant_v1.md")
         user = f"[참고 자료]\n{context[:14000]}\n\n[질문]\n{question}"
@@ -244,6 +274,15 @@ class MockLLMClient(LLMClient):
                 }
             ],
         }
+
+    def generate_report_illustration_scene(
+        self, summary: str, highlights: list[dict], report_date: date
+    ) -> str:
+        topic = highlights[0]["title"] if highlights else summary[:80]
+        return (
+            f"Electric vehicle charging stations and power grid lines under a calm sky, "
+            f"symbolizing industry news on {report_date.isoformat()}: {topic[:60]}"
+        )
 
     def classify_chat_question(self, question: str) -> dict:
         blob = question.lower()

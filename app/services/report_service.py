@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -5,6 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import get_settings
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.models.daily_report import DailyReport, DailyReportItem
 from app.models.enums import BoardType, Importance, PostStatus
@@ -12,8 +14,10 @@ from app.models.post import Post
 from app.schemas.post import PostRead
 from app.schemas.report import DailyReportDetail, DailyReportItemRead, DailyReportRead
 from app.services.llm_client import get_llm_client
+from app.services.report_illustration_service import ReportIllustrationService
 
 KST = ZoneInfo("Asia/Seoul")
+logger = logging.getLogger(__name__)
 
 
 def format_report_title(report_date: date) -> str:
@@ -190,8 +194,27 @@ class ReportService:
                 )
             )
 
+        self._attach_illustration(report, client, normalized)
+
         self.db.commit()
         return self.get_report(report.id, organization_id)
+
+    def _attach_illustration(self, report: DailyReport, client, normalized: dict) -> None:
+        settings = get_settings()
+        if not settings.report_illustration_enabled or not settings.gemini_api_key:
+            return
+        try:
+            scene = client.generate_report_illustration_scene(
+                normalized["summary"],
+                normalized["key_changes"],
+                report.report_date,
+            )
+            illus = ReportIllustrationService()
+            image_bytes = illus.generate_image_bytes(scene)
+            if image_bytes:
+                report.illustration_url = illus.save_for_report(report.id, image_bytes)
+        except Exception as exc:
+            logger.warning("Report illustration skipped for %s: %s", report.id, exc)
 
     def _normalize_report_result(self, result: dict, target: date) -> dict:
         recs = result.get("recommendations") or result.get("key_changes") or []

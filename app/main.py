@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import api_router
 from app.core.config import get_settings
@@ -10,6 +12,9 @@ from app.core.logging import setup_logging
 from app.services.seed import seed_defaults
 
 settings = get_settings()
+media_root = Path(settings.media_root)
+media_root.mkdir(parents=True, exist_ok=True)
+(media_root / "reports").mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager
@@ -33,3 +38,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(api_router)
+app.mount(settings.media_url_prefix, StaticFiles(directory=str(media_root)), name="media")

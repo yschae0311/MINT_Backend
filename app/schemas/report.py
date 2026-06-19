@@ -31,6 +31,7 @@ class DailyReportRead(ORMBase):
     action_items: list | None
     model: str
     slack_sent: bool
+    illustration_url: str | None = None
     created_at: datetime
     updated_at: datetime
 

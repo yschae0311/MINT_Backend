@@ -29,6 +29,7 @@ class DashboardLatestReport(BaseModel):
     report_date: str
     summary: str
     slack_sent: bool
+    illustration_url: str | None = None
     highlights: list[DashboardReportHighlight] = []
 
 
@@ -39,6 +40,7 @@ class DashboardStatsResponse(BaseModel):
     high_importance: int
     active_sources: int
     total_sources: int
+    discovery_pending_retention_days: int
     latest_report: DashboardLatestReport | None
     trusted_preview: list[DashboardPostPreview]
     discovery_preview: list[DashboardPostPreview]
