@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -10,6 +11,7 @@ from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.schemas.post import AIOutputRead, PostCreate, PostDetail, PostRead, PostUpdate
 from app.services.ai_service import AIService
+from app.services.original_preview_service import OriginalPreviewService
 from app.services.post_service import PostService
 
 router = APIRouter()
@@ -48,6 +50,16 @@ def get_post(
     db: Session = Depends(get_db),
 ):
     return PostService(db).get_post(post_id, user.organization_id)
+
+
+@router.get("/{post_id}/original-preview", response_class=HTMLResponse)
+def original_preview(
+    post_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    html = OriginalPreviewService(db).build_preview(post_id, user.organization_id)
+    return HTMLResponse(content=html, headers={"Cache-Control": "private, max-age=300"})
 
 
 @router.post("", response_model=PostRead)
