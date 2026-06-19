@@ -78,6 +78,7 @@ sudo systemctl restart mint-api mint-celery-worker mint-celery-beat
 
 | Time | Task |
 |------|------|
+| 05:30 | 미승인 AI 발견 후보 자동 삭제 (기본 14일 초과 pending) |
 | 06:00 | 크롤 + 디스커버리 파이프라인 |
 | 08:00 | 데일리 리포트 생성 (당일 KST 수집분) |
 | 08:30 | Slack 전송 |

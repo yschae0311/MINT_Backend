@@ -16,6 +16,10 @@ celery_app.conf.update(
 celery_app.autodiscover_tasks(["app.workers"])
 
 celery_app.conf.beat_schedule = {
+    "purge-stale-discovery-posts": {
+        "task": "app.workers.tasks.purge_stale_discovery_posts_task",
+        "schedule": crontab(hour=5, minute=30),
+    },
     "daily-discovery-pipeline": {
         "task": "app.workers.tasks.discovery_pipeline_task",
         "schedule": crontab(hour=6, minute=0),

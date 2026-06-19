@@ -1,10 +1,11 @@
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.models.ai_output import AIOutput
 from app.models.enums import BoardType, CreatedBy, PostStatus
@@ -151,6 +152,41 @@ class PostService:
         post.reviewed_at = datetime.now(timezone.utc)
         self.db.commit()
         return self._to_read(post)
+
+    def purge_stale_pending_discovery(
+        self,
+        organization_id: UUID,
+        *,
+        retention_days: int | None = None,
+    ) -> int:
+        days = (
+            retention_days
+            if retention_days is not None
+            else get_settings().discovery_pending_retention_days
+        )
+        if days <= 0:
+            return 0
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        posts = list(
+            self.db.scalars(
+                select(Post).where(
+                    Post.organization_id == organization_id,
+                    Post.board_type == BoardType.discovery,
+                    Post.status == PostStatus.pending,
+                    Post.collected_at < cutoff,
+                )
+            ).all()
+        )
+        if not posts:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        for post in posts:
+            post.status = PostStatus.deleted
+            post.reviewed_at = now
+        self.db.commit()
+        return len(posts)
 
     def pending_count(self, organization_id: UUID) -> int:
         return (

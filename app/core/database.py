@@ -32,6 +32,20 @@ def _ensure_pg_schema() -> None:
     logger.info('Ensured PostgreSQL schema "%s"', _schema)
 
 
+def _migrate_pg_columns() -> None:
+    """Lightweight dev migrations for columns created before enum values grew."""
+    if settings.is_sqlite or not _schema:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".background_jobs '
+                "ALTER COLUMN status TYPE VARCHAR(16)"
+            )
+        )
+    logger.debug('Ensured background_jobs.status column width')
+
+
 def init_db() -> None:
     """Create tables that do not exist yet (dev-friendly; production should use Alembic)."""
     import app.models  # noqa: F401 — register all models on Base.metadata
@@ -42,6 +56,13 @@ def init_db() -> None:
         inspector.get_table_names(schema=_schema) if _schema else inspector.get_table_names()
     )
     Base.metadata.create_all(bind=engine)
+    if "background_jobs" in existing or "background_jobs" in {
+        t.name for t in Base.metadata.sorted_tables
+    }:
+        try:
+            _migrate_pg_columns()
+        except Exception as exc:
+            logger.debug("background_jobs column migration skipped: %s", exc)
     created = [t.name for t in Base.metadata.sorted_tables if t.name not in existing]
     if created:
         loc = f'{_schema}.' if _schema else ""

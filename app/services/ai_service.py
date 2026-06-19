@@ -54,7 +54,7 @@ class AIService:
             importance=importance,
             confidence=result.get("confidence"),
             model=model_name,
-            prompt_version="v1",
+            prompt_version="v2",
         )
         post.importance = importance
         self.db.add(output)

@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     seed_admin_password: str = "admin1234"
     seed_admin_name: str = "김민트"
 
+    """AI 발견 게시판에서 검토 대기(pending) 상태로 남은 글을 soft-delete 하는 보관 일수. 0이면 비활성."""
+    discovery_pending_retention_days: int = 14
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

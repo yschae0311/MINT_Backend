@@ -7,6 +7,7 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestError
 from app.services.ev_relevance import is_obvious_junk, is_weak_topic_only, passes_keyword_gate
+from app.services.korean_output import KOREAN_RETRY_NOTE, KOREAN_USER_SUFFIX, result_needs_korean_retry
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -88,10 +89,32 @@ class GeminiClient(LLMClient):
             raise BadRequestError(f"Gemini empty response (finish_reason={finish})")
         return text
 
+    def _generate_json_korean(
+        self,
+        model_name: str,
+        system: str,
+        user: str,
+        *,
+        string_fields: tuple[str, ...],
+        list_fields: tuple[str, ...] = (),
+    ) -> dict:
+        payload_user = f"{user.rstrip()}{KOREAN_USER_SUFFIX}"
+        result = _parse_json(self._generate(model_name, system, payload_user, json_mode=True))
+        if not result_needs_korean_retry(result, string_fields, list_fields):
+            return result
+        retry_user = f"{payload_user}{KOREAN_RETRY_NOTE}"
+        return _parse_json(self._generate(model_name, system, retry_user, json_mode=True))
+
     def summarize_post(self, title: str, content: str) -> dict:
         system = _load_prompt("post_summary_v1.md")
-        user = f"Title: {title}\n\nContent:\n{content[:12000]}"
-        return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
+        user = f"제목: {title}\n\n본문:\n{content[:12000]}"
+        return self._generate_json_korean(
+            self.summary_model,
+            system,
+            user,
+            string_fields=("summary", "impact"),
+            list_fields=("action_items",),
+        )
 
     def evaluate_discovery_candidate(self, title: str, content: str, url: str) -> dict:
         if is_obvious_junk(title, content, url) or not passes_keyword_gate(title, content, url):
@@ -110,8 +133,14 @@ class GeminiClient(LLMClient):
                 "confidence": 0.9,
             }
         system = _load_prompt("discovery_evaluate_v1.md")
-        user = f"URL: {url}\nTitle: {title}\n\nContent:\n{content[:12000]}"
-        return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
+        user = f"URL: {url}\n제목: {title}\n\n본문:\n{content[:12000]}"
+        return self._generate_json_korean(
+            self.summary_model,
+            system,
+            user,
+            string_fields=("relevance_reason", "summary", "impact"),
+            list_fields=("action_items",),
+        )
 
     def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
         system = _load_prompt("daily_report_v1.md")
@@ -119,7 +148,13 @@ class GeminiClient(LLMClient):
             {"report_date": report_date.isoformat(), "posts": posts},
             ensure_ascii=False,
         )
-        return _parse_json(self._generate(self.report_model, system, user, json_mode=True))
+        return self._generate_json_korean(
+            self.report_model,
+            system,
+            user,
+            string_fields=("summary",),
+            list_fields=(),
+        )
 
     def answer_question(self, question: str, context: str) -> str:
         system = _load_prompt("chat_assistant_v1.md")

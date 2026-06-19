@@ -362,7 +362,7 @@ class CrawlerService:
             importance=importance,
             confidence=evaluation.get("confidence"),
             model=model_name,
-            prompt_version="discovery_v1",
+            prompt_version="discovery_v2",
         )
         post.importance = importance
         self.db.add(output)

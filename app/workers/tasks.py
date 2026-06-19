@@ -14,6 +14,7 @@ from app.services.ai_service import AIService
 from app.services.crawl_skip_stats import CrawlSkipStats
 from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService
+from app.services.post_service import PostService
 from app.services.report_service import ReportService
 from app.services.slack_service import SlackService
 from app.workers.celery_app import celery_app
@@ -163,6 +164,44 @@ def crawl_all_sources_task():
                 jobs.complete_job(job.id, msg)
             except Exception as exc:
                 logger.exception("crawl_all_sources org=%s failed", org.id)
+                jobs.fail_job(job.id, str(exc))
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.purge_stale_discovery_posts_task")
+def purge_stale_discovery_posts_task(retention_days: int | None = None):
+    from app.core.config import get_settings
+
+    days = (
+        retention_days
+        if retention_days is not None
+        else get_settings().discovery_pending_retention_days
+    )
+    if days <= 0:
+        logger.info("purge_stale_discovery skipped (retention_days=%s)", days)
+        return
+
+    db = SessionLocal()
+    try:
+        for org in db.scalars(select(Organization)).all():
+            jobs = JobService(db)
+            job = jobs.create_job(
+                org.id,
+                JobType.purge_stale_discovery,
+                f"미승인 AI 발견 정리 ({days}일 초과)",
+                progress_total=1,
+            )
+            db.commit()
+            try:
+                jobs.start_job(job.id)
+                jobs.update_progress(job.id, 0, 1, "만료 후보 검색 중…")
+                count = PostService(db).purge_stale_pending_discovery(org.id, retention_days=days)
+                jobs.complete_job(job.id, f"삭제 {count}건")
+                if count:
+                    logger.info("purge_stale_discovery org=%s deleted=%s", org.id, count)
+            except Exception as exc:
+                logger.exception("purge_stale_discovery org=%s failed", org.id)
                 jobs.fail_job(job.id, str(exc))
     finally:
         db.close()
