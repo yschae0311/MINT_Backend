@@ -47,7 +47,9 @@ class CrawlSkipStats:
         self.counts[reason] += n
         if reason == "ai_billing_depleted":
             self.billing_depleted = True
-        if sample and not self.error_sample and reason.startswith("ai_"):
+        if sample and not self.error_sample and (
+            reason.startswith("ai_") or reason in ("reddit_blocked", "fetch_failed")
+        ):
             self.error_sample = sample[:320]
 
     def merge(self, other: CrawlSkipStats) -> None:

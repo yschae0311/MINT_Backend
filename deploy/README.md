@@ -92,4 +92,10 @@ journalctl -u mint-celery-worker -f
 
 Prerequisites: active sources in DB, `GEMINI_API_KEY`, Slack webhook (`purpose=daily` or `all`).
 
-**Reddit community sources:** Reddit blocks unauthenticated requests from most server IPs (403/429). Set either OAuth (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`) or RSS tokens (`REDDIT_RSS_USER`, `REDDIT_RSS_FEED` from https://www.reddit.com/prefs/feeds ) in `.env`.
+**Reddit community sources:** Reddit blocks unauthenticated requests from most server IPs (403/429). On the **EC2** host, add to `/home/ubuntu/MINT_Backend/.env`:
+
+```env
+REDDIT_RSS_AUTH_URL=https://old.reddit.com/user/…/saved.rss?feed=…&user=…
+```
+
+Then restart **both** `mint-api` and `mint-celery-worker` (the worker runs the crawl jobs).

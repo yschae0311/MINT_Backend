@@ -203,9 +203,15 @@ def is_reddit_access_denied(exc: Exception) -> bool:
 
 
 def reddit_fetch_hint(exc: Exception | None, client: RedditClient) -> str:
-    if client.has_oauth() or client.has_rss_auth():
-        return (str(exc) if exc else "Reddit feed returned no entries")[:320]
-    return (
-        "Reddit blocks unauthenticated server access (403/429). "
-        "Configure REDDIT_CLIENT_ID/SECRET/USERNAME/PASSWORD or REDDIT_RSS_USER/FEED in .env"
-    )
+    if not client.has_rss_auth() and not client.has_oauth():
+        return (
+            "서버 .env에 REDDIT_RSS_AUTH_URL(또는 REDDIT_RSS_USER/FEED)이 없습니다. "
+            "Celery worker가 돌아가는 EC2의 /home/ubuntu/MINT_Backend/.env 에 설정 후 worker 재시작 필요."
+        )
+    if client.has_rss_auth():
+        if exc:
+            return f"인증 RSS 수집 실패: {exc}"[:320]
+        return "인증 RSS 응답이 비었습니다. 토큰 만료 시 old.reddit.com/prefs/feeds 에서 재발급하세요."
+    if exc:
+        return f"OAuth 수집 실패: {exc}"[:320]
+    return "Reddit feed returned no entries"
