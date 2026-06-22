@@ -45,6 +45,12 @@ def _migrate_pg_columns() -> None:
         )
         conn.execute(
             text(
+                f'ALTER TABLE "{_schema}".background_jobs '
+                "ALTER COLUMN job_type TYPE VARCHAR(32)"
+            )
+        )
+        conn.execute(
+            text(
                 f'ALTER TABLE "{_schema}".organizations '
                 "ADD COLUMN IF NOT EXISTS discovery_pending_retention_days INTEGER"
             )
