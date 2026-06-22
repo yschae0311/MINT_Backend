@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     reddit_rss_auth_url: str = ""
     reddit_rss_user: str = ""
     reddit_rss_feed: str = ""
+    """EC2 등 datacenter IP에서 Reddit RSS가 403이면 HTTP 프록시(선택)"""
+    reddit_http_proxy: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

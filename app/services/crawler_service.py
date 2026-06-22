@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import BadRequestError, NotFoundError
+from app.core.config import get_settings
 from app.models.ai_output import AIOutput
 from app.models.enums import BoardType, CreatedBy, Importance, PostStatus, SourceType, TrustLevel
 from app.models.post import Post
@@ -99,6 +99,7 @@ class CrawlerService:
             "User-Agent": REDDIT_USER_AGENT,
             "Accept": accept,
         }
+        proxy = get_settings().reddit_http_proxy.strip() or None
         last_error: Exception | None = None
         for attempt in range(self.fetch_retries):
             try:
@@ -106,6 +107,7 @@ class CrawlerService:
                     timeout=self.timeout,
                     follow_redirects=True,
                     headers=headers,
+                    proxy=proxy,
                 ) as client:
                     resp = client.get(url)
                     if resp.status_code == 429:

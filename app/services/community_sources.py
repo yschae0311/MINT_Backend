@@ -54,6 +54,7 @@ def reddit_listing_rss_url(
     limit: int = 25,
     rss_user: str | None = None,
     rss_feed: str | None = None,
+    host: str = "old.reddit.com",
 ) -> str:
     """Subreddit Atom/RSS feed — append user/feed tokens to bypass server IP blocks."""
     parsed = urlparse(url.strip())
@@ -63,7 +64,61 @@ def reddit_listing_rss_url(
     query = f"limit={limit}"
     if rss_user and rss_feed:
         query += f"&user={rss_user}&feed={rss_feed}"
-    return f"https://{parsed.netloc}{path}/.rss?{query}"
+    return f"https://{host}{path}/.rss?{query}"
+
+
+def reddit_listing_rss_urls(
+    url: str,
+    *,
+    limit: int = 25,
+    rss_user: str | None = None,
+    rss_feed: str | None = None,
+) -> list[str]:
+    """Try old.reddit first — AWS/datacenter IPs often get 403 on www RSS."""
+    return [
+        reddit_listing_rss_url(
+            url, limit=limit, rss_user=rss_user, rss_feed=rss_feed, host=host
+        )
+        for host in ("old.reddit.com", "www.reddit.com")
+    ]
+
+
+def reddit_old_listing_page_urls(url: str) -> list[str]:
+    sub_match = re.search(r"/r/([^/]+)", _reddit_subreddit_path(url), re.I)
+    if not sub_match:
+        return []
+    subreddit = sub_match.group(1)
+    return [
+        f"https://old.reddit.com/r/{subreddit}/hot/",
+        f"https://old.reddit.com/r/{subreddit}/",
+    ]
+
+
+def parse_old_reddit_listing_html(html: str, *, limit: int) -> list[dict]:
+    """Parse old.reddit.com subreddit listing when RSS is blocked from datacenter IPs."""
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[dict] = []
+    for thing in soup.select("div.thing.link"):
+        if len(results) >= limit:
+            break
+        title_el = thing.select_one("p.title a.title") or thing.select_one("a.title")
+        if not title_el:
+            continue
+        title = title_el.get_text(strip=True)
+        href = (title_el.get("href") or "").strip()
+        if not title or not href:
+            continue
+        permalink = href if href.startswith("/") else urlparse(href).path
+        results.append(
+            {
+                "title": title,
+                "url": reddit_post_url(permalink),
+                "permalink": permalink,
+                "selftext": "",
+                "_from_html": True,
+            }
+        )
+    return results
 
 
 def reddit_post_url(permalink: str) -> str:

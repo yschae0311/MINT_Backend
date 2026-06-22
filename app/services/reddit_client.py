@@ -1,4 +1,4 @@
-"""Reddit listing fetch — OAuth API or authenticated RSS (unauthenticated access is blocked from many server IPs)."""
+"""Reddit listing fetch — OAuth API, authenticated RSS, or old.reddit HTML fallback."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ from app.services.community_sources import (
     REDDIT_REQUEST_DELAY_SEC,
     REDDIT_USER_AGENT,
     _reddit_subreddit_path,
-    reddit_listing_rss_url,
+    parse_old_reddit_listing_html,
+    reddit_listing_rss_urls,
+    reddit_old_listing_page_urls,
     reddit_post_url,
     resolve_reddit_rss_credentials,
 )
@@ -60,24 +62,62 @@ class RedditClient:
             rss_feed=self.settings.reddit_rss_feed,
         )
 
+    def _http_client(self) -> httpx.Client:
+        proxy = self.settings.reddit_http_proxy.strip() or None
+        return httpx.Client(timeout=20.0, follow_redirects=True, proxy=proxy)
+
+    def _request_headers(self, *, accept: str) -> dict[str, str]:
+        return {
+            "User-Agent": REDDIT_USER_AGENT,
+            "Accept": accept,
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
     def fetch_listing(self, source_url: str, *, limit: int) -> list[dict]:
-        """Return raw Reddit post dicts (OAuth) or synthetic dicts from RSS entries."""
-        # Prefer authenticated RSS if configured.
-        # Why: Reddit server IPs often get blocked for unauthenticated endpoints, and OAuth
-        # approval may still fail. If we have RSS tokens, we should use them first.
+        """Return raw Reddit post dicts from RSS, HTML, or OAuth."""
+        last_error: Exception | None = None
+
         if self.has_rss_auth():
-            entries = self._fetch_rss_entries(source_url, limit=limit, authenticated=True)
-            if entries:
-                return entries
-            # RSS token might be invalid/expired; fall back to OAuth if available.
+            try:
+                entries = self._fetch_rss_entries(source_url, limit=limit, authenticated=True)
+                if entries:
+                    return entries
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Reddit RSS failed for %s: %s", source_url, exc)
+
+            try:
+                entries = self._fetch_html_listing(source_url, limit=limit)
+                if entries:
+                    logger.info("Reddit HTML fallback succeeded for %s", source_url)
+                    return entries
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Reddit HTML fallback failed for %s: %s", source_url, exc)
+
             if self.has_oauth():
                 return self._fetch_oauth_listing(source_url, limit=limit)
-            return entries
 
-        # No RSS tokens: fall back to OAuth (if present) or unauthenticated RSS.
-        if self.has_oauth():
+        elif self.has_oauth():
             return self._fetch_oauth_listing(source_url, limit=limit)
-        return self._fetch_rss_entries(source_url, limit=limit, authenticated=False)
+        else:
+            try:
+                entries = self._fetch_rss_entries(source_url, limit=limit, authenticated=False)
+                if entries:
+                    return entries
+            except Exception as exc:
+                last_error = exc
+
+            try:
+                entries = self._fetch_html_listing(source_url, limit=limit)
+                if entries:
+                    return entries
+            except Exception as exc:
+                last_error = exc
+
+        if last_error:
+            raise last_error
+        return []
 
     def _oauth_user_agent(self) -> str:
         return f"MINT/1.0 (EV intelligence desk; u/{self.settings.reddit_username.strip()})"
@@ -139,24 +179,62 @@ class RedditClient:
     def _fetch_rss_entries(self, source_url: str, *, limit: int, authenticated: bool) -> list[dict]:
         creds = self._rss_credentials() if authenticated else None
         rss_user, rss_feed = creds if creds else ("", "")
-        rss_url = reddit_listing_rss_url(
+        rss_urls = reddit_listing_rss_urls(
             source_url,
             limit=limit,
             rss_user=rss_user or None,
             rss_feed=rss_feed or None,
         )
-        headers = {
-            "User-Agent": REDDIT_USER_AGENT,
-            "Accept": "application/atom+xml,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-            resp = client.get(rss_url, headers=headers)
-            if resp.status_code == 429:
-                time.sleep(REDDIT_REQUEST_DELAY_SEC * 3)
-                resp = client.get(rss_url, headers=headers)
-            resp.raise_for_status()
-            feed = feedparser.parse(resp.text)
+        headers = self._request_headers(
+            accept="application/atom+xml,application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        last_error: Exception | None = None
 
+        with self._http_client() as client:
+            for rss_url in rss_urls:
+                try:
+                    resp = client.get(rss_url, headers=headers)
+                    if resp.status_code == 429:
+                        time.sleep(REDDIT_REQUEST_DELAY_SEC * 3)
+                        resp = client.get(rss_url, headers=headers)
+                    resp.raise_for_status()
+                    feed = feedparser.parse(resp.text)
+                    if not feed.entries:
+                        continue
+                    return self._entries_from_rss(feed)
+                except Exception as exc:
+                    last_error = exc
+                    logger.debug("Reddit RSS attempt failed %s: %s", rss_url, exc)
+
+        if last_error:
+            raise last_error
+        return []
+
+    def _fetch_html_listing(self, source_url: str, *, limit: int) -> list[dict]:
+        headers = self._request_headers(accept="text/html,application/xhtml+xml,*/*;q=0.8")
+        last_error: Exception | None = None
+
+        with self._http_client() as client:
+            for page_url in reddit_old_listing_page_urls(source_url):
+                try:
+                    resp = client.get(page_url, headers=headers)
+                    if resp.status_code == 429:
+                        time.sleep(REDDIT_REQUEST_DELAY_SEC * 3)
+                        resp = client.get(page_url, headers=headers)
+                    resp.raise_for_status()
+                    posts = parse_old_reddit_listing_html(resp.text, limit=limit)
+                    if posts:
+                        return posts
+                except Exception as exc:
+                    last_error = exc
+                    logger.debug("Reddit HTML attempt failed %s: %s", page_url, exc)
+
+        if last_error:
+            raise last_error
+        return []
+
+    @staticmethod
+    def _entries_from_rss(feed) -> list[dict]:
         results: list[dict] = []
         for entry in feed.entries:
             title = (entry.get("title") or "").strip()
@@ -206,12 +284,19 @@ def reddit_fetch_hint(exc: Exception | None, client: RedditClient) -> str:
     if not client.has_rss_auth() and not client.has_oauth():
         return (
             "서버 .env에 REDDIT_RSS_AUTH_URL(또는 REDDIT_RSS_USER/FEED)이 없습니다. "
-            "Celery worker가 돌아가는 EC2의 /home/ubuntu/MINT_Backend/.env 에 설정 후 worker 재시작 필요."
+            "Celery worker .env 설정 후 worker 재시작 필요."
         )
+    blocked = exc is not None and is_reddit_access_denied(exc)
+    if blocked:
+        return (
+            "AWS/EC2 IP에서 Reddit RSS가 403으로 차단되었습니다. "
+            "최신 코드는 old.reddit HTML 폴백을 시도합니다. "
+            "그래도 실패하면 REDDIT_HTTP_PROXY(선택) 설정을 검토하세요."
+        )[:320]
     if client.has_rss_auth():
         if exc:
-            return f"인증 RSS 수집 실패: {exc}"[:320]
-        return "인증 RSS 응답이 비었습니다. 토큰 만료 시 old.reddit.com/prefs/feeds 에서 재발급하세요."
+            return f"Reddit 수집 실패: {exc}"[:320]
+        return "Reddit 응답이 비었습니다. 토큰 만료 시 old.reddit.com/prefs/feeds 에서 재발급하세요."
     if exc:
         return f"OAuth 수집 실패: {exc}"[:320]
     return "Reddit feed returned no entries"
