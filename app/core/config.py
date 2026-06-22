@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     """AI 발견 게시판에서 검토 대기(pending) 상태로 남은 글을 soft-delete 하는 보관 일수. 0이면 비활성."""
     discovery_pending_retention_days: int = 14
 
+    # Reddit — 서버 IP에서 비인증 JSON/RSS는 403/429. OAuth 또는 RSS 토큰 중 하나 필요.
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    reddit_username: str = ""
+    reddit_password: str = ""
+    """https://old.reddit.com/prefs/feeds 의 saved 등 private 피드 URL 전체를 붙여넣어도 됨"""
+    reddit_rss_auth_url: str = ""
+    reddit_rss_user: str = ""
+    reddit_rss_feed: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

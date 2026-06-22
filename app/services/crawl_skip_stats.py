@@ -5,6 +5,7 @@ from collections import Counter
 SKIP_LABELS: dict[str, str] = {
     "no_url": "URL 없음",
     "fetch_failed": "본문 수집 실패",
+    "reddit_blocked": "Reddit 차단 — OAuth/RSS 설정 필요",
     "content_short": "본문 너무 짧음",
     "title_invalid": "제목 형식 부적합",
     "site_junk": "사이트 안내·약관 페이지",

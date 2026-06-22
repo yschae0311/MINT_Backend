@@ -91,3 +91,5 @@ journalctl -u mint-celery-worker -f
 ```
 
 Prerequisites: active sources in DB, `GEMINI_API_KEY`, Slack webhook (`purpose=daily` or `all`).
+
+**Reddit community sources:** Reddit blocks unauthenticated requests from most server IPs (403/429). Set either OAuth (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`) or RSS tokens (`REDDIT_RSS_USER`, `REDDIT_RSS_FEED` from https://www.reddit.com/prefs/feeds ) in `.env`.

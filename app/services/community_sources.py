@@ -30,22 +30,86 @@ def is_community_source_type(source_type: SourceType) -> bool:
     return source_type in COMMUNITY_SOURCE_TYPES
 
 
+def _reddit_subreddit_path(url: str) -> str:
+    parsed = urlparse(url.strip())
+    path = parsed.path.rstrip("/")
+    if path.endswith(".json"):
+        path = path[: -len(".json")]
+    if path.endswith(".rss"):
+        path = path[: -len(".rss")]
+    return path
+
+
 def reddit_listing_json_url(url: str, *, limit: int = 25) -> str:
     parsed = urlparse(url.strip())
     if "reddit.com" not in parsed.netloc.lower():
         return url
-    path = parsed.path.rstrip("/")
-    if path.endswith(".json"):
-        return url
-    if path.endswith(".rss"):
-        path = path[: -len(".rss")]
+    path = _reddit_subreddit_path(url)
     return f"https://{parsed.netloc}{path}.json?limit={limit}"
+
+
+def reddit_listing_rss_url(
+    url: str,
+    *,
+    limit: int = 25,
+    rss_user: str | None = None,
+    rss_feed: str | None = None,
+) -> str:
+    """Subreddit Atom/RSS feed — append user/feed tokens to bypass server IP blocks."""
+    parsed = urlparse(url.strip())
+    if "reddit.com" not in parsed.netloc.lower():
+        return url
+    path = _reddit_subreddit_path(url)
+    query = f"limit={limit}"
+    if rss_user and rss_feed:
+        query += f"&user={rss_user}&feed={rss_feed}"
+    return f"https://{parsed.netloc}{path}/.rss?{query}"
 
 
 def reddit_post_url(permalink: str) -> str:
     if permalink.startswith("http"):
         return permalink
     return urljoin("https://www.reddit.com", permalink)
+
+
+def reddit_old_post_url(post_url: str) -> str:
+    """old.reddit.com serves post HTML without the new SPA shell."""
+    parsed = urlparse(post_url.strip())
+    host = parsed.netloc.lower()
+    if "reddit.com" not in host:
+        return post_url
+    old_host = "old.reddit.com"
+    return parsed._replace(netloc=old_host).geturl()
+
+
+def parse_reddit_rss_auth(url: str) -> tuple[str, str] | None:
+    """Extract user/feed tokens from a private Reddit RSS URL (e.g. saved.rss?feed=…&user=…)."""
+    from urllib.parse import parse_qs
+
+    parsed = urlparse(url.strip())
+    if "reddit.com" not in parsed.netloc.lower():
+        return None
+    query = parse_qs(parsed.query)
+    user_vals = query.get("user") or []
+    feed_vals = query.get("feed") or []
+    user = (user_vals[0] if user_vals else "").strip()
+    feed = (feed_vals[0] if feed_vals else "").strip()
+    if user and feed:
+        return user, feed
+    return None
+
+
+def resolve_reddit_rss_credentials(
+    *, auth_url: str = "", rss_user: str = "", rss_feed: str = ""
+) -> tuple[str, str] | None:
+    parsed = parse_reddit_rss_auth(auth_url)
+    if parsed:
+        return parsed
+    user = rss_user.strip()
+    feed = rss_feed.strip()
+    if user and feed:
+        return user, feed
+    return None
 
 
 def extract_forum_article_links(

@@ -25,12 +25,17 @@ from app.services.community_sources import (
     REDDIT_USER_AGENT,
     extract_forum_article_links,
     is_community_source_type,
-    reddit_listing_json_url,
-    reddit_post_url,
+    reddit_old_post_url,
 )
 from app.services.crawl_skip_stats import CrawlSkipStats, classify_eval_error
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
+from app.services.reddit_client import (
+    RedditClient,
+    is_reddit_access_denied,
+    reddit_fetch_hint,
+    reddit_post_from_raw,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +93,11 @@ class CrawlerService:
             return COMMUNITY_MIN_CONTENT_LEN
         return self.min_content_len
 
-    def _fetch_reddit_json(self, url: str) -> httpx.Response:
+    def _fetch_reddit(self, url: str, *, accept: str) -> httpx.Response:
         headers = {
             **_DEFAULT_HEADERS,
             "User-Agent": REDDIT_USER_AGENT,
-            "Accept": "application/json",
+            "Accept": accept,
         }
         last_error: Exception | None = None
         for attempt in range(self.fetch_retries):
@@ -179,39 +184,23 @@ class CrawlerService:
         )
 
     def _crawl_discovery_reddit(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
-        json_url = reddit_listing_json_url(source.url, limit=self.community_max_candidates)
-        try:
-            resp = self._fetch_reddit_json(json_url)
-            payload = resp.json()
-        except Exception as exc:
-            logger.warning("Reddit fetch failed for %s: %s", source.url, exc)
-            stats.add("fetch_failed", sample=str(exc))
+        candidates = self._fetch_reddit_listing_candidates(source, stats)
+        if not candidates:
             return 0, 0
 
-        children = (payload.get("data") or {}).get("children") or []
         created = skipped = 0
-        for i, child in enumerate(children[: self.community_max_candidates]):
+        for i, (title, post_url, content, published) in enumerate(
+            candidates[: self.community_max_candidates]
+        ):
             if i > 0:
                 time.sleep(REDDIT_REQUEST_DELAY_SEC)
 
-            data = child.get("data") or {}
-            title = (data.get("title") or "").strip()
-            permalink = data.get("permalink") or ""
-            post_url = reddit_post_url(permalink) if permalink else (data.get("url") or "").strip()
             if not title or not post_url:
                 skipped += 1
                 stats.add("no_url")
                 continue
 
-            selftext = (data.get("selftext") or "").strip()
-            content = selftext if len(selftext) >= COMMUNITY_MIN_CONTENT_LEN else f"{title}\n\n{selftext}".strip()
-            if len(content) < COMMUNITY_MIN_CONTENT_LEN:
-                content = f"{title}\n\n(Reddit 게시글 — 본문이 짧거나 링크 공유입니다.)"
-
-            published = None
-            created_utc = data.get("created_utc")
-            if created_utc:
-                published = datetime.fromtimestamp(float(created_utc), tz=timezone.utc)
+            content = self._enrich_reddit_post_content(title, post_url, content)
 
             ok, reason = self._process_discovery_candidate(
                 source, title, post_url, content, published, stats
@@ -222,6 +211,53 @@ class CrawlerService:
                 skipped += 1
                 stats.add(reason or "other")
         return created, skipped
+
+    def _fetch_reddit_listing_candidates(
+        self, source: Source, stats: CrawlSkipStats
+    ) -> list[tuple[str, str, str, datetime | None]] | None:
+        client = RedditClient()
+        try:
+            raw_posts = client.fetch_listing(source.url, limit=self.community_max_candidates)
+        except Exception as exc:
+            logger.warning("Reddit listing fetch failed for %s: %s", source.url, exc)
+            reason = "reddit_blocked" if is_reddit_access_denied(exc) else "fetch_failed"
+            stats.add(reason, sample=reddit_fetch_hint(exc, client))
+            return None
+
+        if not raw_posts:
+            stats.add("reddit_blocked", sample=reddit_fetch_hint(None, client))
+            return None
+
+        return [reddit_post_from_raw(post) for post in raw_posts]
+
+    def _enrich_reddit_post_content(self, title: str, post_url: str, content: str) -> str:
+        content = (content or "").strip()
+        if len(content) < COMMUNITY_MIN_CONTENT_LEN:
+            content = f"{title}\n\n{content}".strip()
+        if len(content) >= COMMUNITY_MIN_CONTENT_LEN:
+            return content
+        extra = self._fetch_reddit_post_selftext(post_url)
+        if extra:
+            content = f"{title}\n\n{extra}".strip()
+        if len(content) < COMMUNITY_MIN_CONTENT_LEN:
+            content = f"{title}\n\n(Reddit 게시글 — 본문이 짧거나 링크 공유입니다.)"
+        return content
+
+    def _fetch_reddit_post_selftext(self, post_url: str) -> str:
+        if "reddit.com" not in post_url:
+            return ""
+        old_url = reddit_old_post_url(post_url)
+        try:
+            resp = self._fetch_reddit(old_url, accept="text/html,application/xhtml+xml,*/*;q=0.8")
+            soup = BeautifulSoup(resp.text, "html.parser")
+            body = soup.select_one("div.expando div.usertext-body") or soup.select_one(
+                "form.usertext div.usertext-body"
+            )
+            if body:
+                return body.get_text(" ", strip=True)
+        except Exception as exc:
+            logger.debug("Reddit post fetch failed for %s: %s", post_url, exc)
+        return ""
 
     def _crawl_discovery_community_forum(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
         resp = self._fetch_url(source.url)
