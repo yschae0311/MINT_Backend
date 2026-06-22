@@ -62,14 +62,22 @@ class RedditClient:
 
     def fetch_listing(self, source_url: str, *, limit: int) -> list[dict]:
         """Return raw Reddit post dicts (OAuth) or synthetic dicts from RSS entries."""
+        # Prefer authenticated RSS if configured.
+        # Why: Reddit server IPs often get blocked for unauthenticated endpoints, and OAuth
+        # approval may still fail. If we have RSS tokens, we should use them first.
+        if self.has_rss_auth():
+            entries = self._fetch_rss_entries(source_url, limit=limit, authenticated=True)
+            if entries:
+                return entries
+            # RSS token might be invalid/expired; fall back to OAuth if available.
+            if self.has_oauth():
+                return self._fetch_oauth_listing(source_url, limit=limit)
+            return entries
+
+        # No RSS tokens: fall back to OAuth (if present) or unauthenticated RSS.
         if self.has_oauth():
             return self._fetch_oauth_listing(source_url, limit=limit)
-        entries = self._fetch_rss_entries(source_url, limit=limit, authenticated=self.has_rss_auth())
-        if entries:
-            return entries
-        if not self.has_rss_auth():
-            entries = self._fetch_rss_entries(source_url, limit=limit, authenticated=False)
-        return entries
+        return self._fetch_rss_entries(source_url, limit=limit, authenticated=False)
 
     def _oauth_user_agent(self) -> str:
         return f"MINT/1.0 (EV intelligence desk; u/{self.settings.reddit_username.strip()})"
