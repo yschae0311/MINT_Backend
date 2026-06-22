@@ -6,11 +6,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.models.enums import JobType, TrustLevel
+from app.models.enums import JobType, SourceType, TrustLevel
 from app.models.organization import Organization
 from app.models.post import Post
 from app.models.source import Source
 from app.services.ai_service import AIService
+from app.services.community_sources import COMMUNITY_SOURCE_TYPES
 from app.services.crawl_skip_stats import CrawlSkipStats
 from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService
@@ -35,11 +36,18 @@ def _run_crawl_all(
     *,
     to_discovery: bool,
     trusted_only: bool,
+    community_only: bool = False,
+    exclude_community: bool = False,
 ) -> str:
     crawler = CrawlerService(db)
     q = select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
-    if to_discovery and trusted_only:
+    if community_only:
+        q = q.where(Source.source_type.in_(tuple(COMMUNITY_SOURCE_TYPES)))
+    elif to_discovery and trusted_only:
         q = q.where(Source.trust_level == TrustLevel.high)
+    if exclude_community and not community_only:
+        q = q.where(Source.source_type.not_in(tuple(COMMUNITY_SOURCE_TYPES)))
+        q = q.where(Source.trust_level != TrustLevel.low)
     sources = list(db.scalars(q).all())
     total = len(sources)
     jobs.update_progress(job_id, 0, total, f"0/{total} 소스 준비")
@@ -94,7 +102,12 @@ def crawl_source_job_task(job_id: str, source_id: str, organization_id: str, to_
 
 
 @celery_app.task(name="app.workers.tasks.crawl_all_discovery_job_task")
-def crawl_all_discovery_job_task(job_id: str, organization_id: str, trusted_only: bool = True):
+def crawl_all_discovery_job_task(
+    job_id: str,
+    organization_id: str,
+    trusted_only: bool = True,
+    community_only: bool = False,
+):
     db = SessionLocal()
     try:
         jobs = JobService(db)
@@ -108,6 +121,7 @@ def crawl_all_discovery_job_task(job_id: str, organization_id: str, trusted_only
             UUID(organization_id),
             to_discovery=True,
             trusted_only=trusted_only,
+            community_only=community_only,
         )
         if jobs.is_cancelled(UUID(job_id)):
             return
@@ -160,7 +174,15 @@ def crawl_all_sources_task():
             db.commit()
             try:
                 jobs.start_job(job.id)
-                msg = _run_crawl_all(db, jobs, job.id, org.id, to_discovery=False, trusted_only=False)
+                msg = _run_crawl_all(
+                    db,
+                    jobs,
+                    job.id,
+                    org.id,
+                    to_discovery=False,
+                    trusted_only=False,
+                    exclude_community=True,
+                )
                 jobs.complete_job(job.id, msg)
             except Exception as exc:
                 logger.exception("crawl_all_sources org=%s failed", org.id)
@@ -233,6 +255,38 @@ def discovery_pipeline_task(trusted_only: bool = True):
                 jobs.complete_job(job.id, msg)
             except Exception as exc:
                 logger.exception("discovery_pipeline org=%s failed", org.id)
+                jobs.fail_job(job.id, str(exc))
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.community_discovery_pipeline_task")
+def community_discovery_pipeline_task():
+    db = SessionLocal()
+    try:
+        for org in db.scalars(select(Organization)).all():
+            jobs = JobService(db)
+            job = jobs.create_job(
+                org.id,
+                JobType.community_discovery_pipeline,
+                "커뮤니티 탐문 파이프라인 (스케줄)",
+                progress_total=1,
+            )
+            db.commit()
+            try:
+                jobs.start_job(job.id)
+                msg = _run_crawl_all(
+                    db,
+                    jobs,
+                    job.id,
+                    org.id,
+                    to_discovery=True,
+                    trusted_only=False,
+                    community_only=True,
+                )
+                jobs.complete_job(job.id, msg)
+            except Exception as exc:
+                logger.exception("community_discovery_pipeline org=%s failed", org.id)
                 jobs.fail_job(job.id, str(exc))
     finally:
         db.close()

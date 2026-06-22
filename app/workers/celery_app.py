@@ -28,6 +28,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.crawl_all_sources_task",
         "schedule": crontab(hour=6, minute=0),
     },
+    "community-discovery-pipeline": {
+        "task": "app.workers.tasks.community_discovery_pipeline_task",
+        "schedule": crontab(hour=6, minute=30),
+    },
     "generate-daily-report": {
         "task": "app.workers.tasks.generate_daily_report_task",
         "schedule": crontab(hour=8, minute=0),

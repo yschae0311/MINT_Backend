@@ -14,6 +14,8 @@ class SourceType(str, enum.Enum):
     news_page = "news_page"
     notice_page = "notice_page"
     manual = "manual"
+    reddit = "reddit"
+    community_forum = "community_forum"
 
 
 class TrustLevel(str, enum.Enum):
@@ -52,6 +54,7 @@ class CreatedBy(str, enum.Enum):
     admin = "admin"
     crawler = "crawler"
     ai_discovery = "ai_discovery"
+    user_submitted = "user_submitted"
 
 
 class SlackPurpose(str, enum.Enum):
@@ -79,6 +82,7 @@ class JobType(str, enum.Enum):
     crawl_all_discovery = "crawl_all_discovery"
     crawl_all = "crawl_all"
     discovery_pipeline = "discovery_pipeline"
+    community_discovery_pipeline = "community_discovery_pipeline"
     generate_report = "generate_report"
     send_slack_report = "send_slack_report"
     summarize_post = "summarize_post"

@@ -75,3 +75,14 @@ class CollectionSettingsRead(BaseModel):
 
 class CollectionSettingsUpdate(BaseModel):
     discovery_pending_retention_days: int = Field(ge=0, le=365)
+
+
+class CommunityUrlSubmit(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+    note: str = Field(default="", max_length=2000)
+
+
+class CommunityUrlSubmitResult(BaseModel):
+    accepted: bool
+    reason: str | None = None

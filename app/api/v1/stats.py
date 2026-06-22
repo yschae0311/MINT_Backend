@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.daily_report import DailyReport
-from app.models.enums import BoardType, Importance, PostStatus
+from app.models.enums import BoardType, Importance, PostStatus, SourceType
 from app.models.post import Post
 from app.models.source import Source
 from app.models.user import User
@@ -25,6 +25,8 @@ from app.services.post_service import PostService
 router = APIRouter()
 
 KST = ZoneInfo("Asia/Seoul")
+
+_COMMUNITY_SOURCE_TYPES = (SourceType.reddit, SourceType.community_forum)
 
 
 def _today_range_kst() -> tuple[datetime, datetime]:
@@ -42,6 +44,7 @@ def _post_preview(post: Post) -> DashboardPostPreview:
         id=str(post.id),
         title=post.title,
         source_name=post.source.name if post.source else None,
+        source_type=post.source.source_type.value if post.source else None,
         board_type=post.board_type,
         status=post.status,
         importance=post.importance,
@@ -57,6 +60,8 @@ def _recent_posts(
     *,
     board_type: BoardType | None = None,
     status: PostStatus | None = None,
+    community_only: bool = False,
+    exclude_community: bool = False,
     limit: int = 5,
 ) -> list[DashboardPostPreview]:
     q = (
@@ -68,6 +73,12 @@ def _recent_posts(
         q = q.where(Post.board_type == board_type)
     if status:
         q = q.where(Post.status == status)
+    if community_only or exclude_community:
+        q = q.join(Source, Post.source_id == Source.id)
+        if community_only:
+            q = q.where(Source.source_type.in_(_COMMUNITY_SOURCE_TYPES))
+        elif exclude_community:
+            q = q.where(Source.source_type.not_in(_COMMUNITY_SOURCE_TYPES))
     posts = db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).unique().all()
     return [_post_preview(p) for p in posts]
 
@@ -174,6 +185,18 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
         latest_report=latest_report,
         trusted_preview=_recent_posts(db, org_id, board_type=BoardType.trusted, limit=8),
         discovery_preview=_recent_posts(
-            db, org_id, board_type=BoardType.discovery, status=PostStatus.pending, limit=4
+            db,
+            org_id,
+            board_type=BoardType.discovery,
+            status=PostStatus.pending,
+            exclude_community=True,
+            limit=4,
+        ),
+        community_voices_preview=_recent_posts(
+            db,
+            org_id,
+            board_type=BoardType.discovery,
+            community_only=True,
+            limit=5,
         ),
     )

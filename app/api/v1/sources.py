@@ -13,14 +13,20 @@ from app.schemas.job import JobRead
 from app.schemas.source import (
     CollectionSettingsRead,
     CollectionSettingsUpdate,
+    CommunityUrlSubmit,
+    CommunityUrlSubmitResult,
     SourceCreate,
     SourceRead,
     SourceUpdate,
 )
+from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService, dispatch_task
 from app.services.org_settings_service import OrgSettingsService
 from app.services.source_service import SourceService
-from app.workers.tasks import crawl_all_discovery_job_task, crawl_source_job_task
+from app.workers.tasks import (
+    crawl_all_discovery_job_task,
+    crawl_source_job_task,
+)
 
 router = APIRouter()
 
@@ -54,6 +60,53 @@ def create_source(
     db: Session = Depends(get_db),
 ):
     return SourceService(db).create_source(user.organization_id, data)
+
+
+@router.post("/submit-url", response_model=CommunityUrlSubmitResult)
+def submit_community_url(
+    data: CommunityUrlSubmit,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    accepted, reason = CrawlerService(db).submit_community_url(
+        user.organization_id,
+        data.url.strip(),
+        title=data.title,
+        note=data.note,
+    )
+    return CommunityUrlSubmitResult(accepted=accepted, reason=reason)
+
+
+@router.post(
+    "/crawl-all-to-discovery",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def crawl_all_to_discovery(
+    trusted_only: bool = True,
+    community_only: bool = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    jobs = JobService(db)
+    jobs.require_idle(user.organization_id)
+    label = "커뮤니티 탐문 파이프라인" if community_only else "전체 AI 발견 파이프라인"
+    job = jobs.create_job(
+        user.organization_id,
+        JobType.community_discovery_pipeline if community_only else JobType.crawl_all_discovery,
+        label,
+        triggered_by=user.id,
+    )
+    db.commit()
+    dispatch_task(
+        crawl_all_discovery_job_task,
+        str(job.id),
+        str(user.organization_id),
+        trusted_only,
+        community_only,
+        db=db,
+    )
+    return JobRead.model_validate(job)
 
 
 @router.get("/{source_id}", response_model=SourceRead)
@@ -147,31 +200,3 @@ def crawl_source_to_discovery(
     )
     return JobRead.model_validate(job)
 
-
-@router.post(
-    "/crawl-all-to-discovery",
-    response_model=JobRead,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def crawl_all_to_discovery(
-    trusted_only: bool = True,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    jobs = JobService(db)
-    jobs.require_idle(user.organization_id)
-    job = jobs.create_job(
-        user.organization_id,
-        JobType.crawl_all_discovery,
-        "전체 AI 발견 파이프라인",
-        triggered_by=user.id,
-    )
-    db.commit()
-    dispatch_task(
-        crawl_all_discovery_job_task,
-        str(job.id),
-        str(user.organization_id),
-        trusted_only,
-        db=db,
-    )
-    return JobRead.model_validate(job)

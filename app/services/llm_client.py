@@ -41,7 +41,9 @@ class LLMClient(ABC):
         ...
 
     @abstractmethod
-    def evaluate_discovery_candidate(self, title: str, content: str, url: str) -> dict:
+    def evaluate_discovery_candidate(
+        self, title: str, content: str, url: str, *, community: bool = False
+    ) -> dict:
         ...
 
     @abstractmethod
@@ -122,7 +124,9 @@ class GeminiClient(LLMClient):
             list_fields=("action_items",),
         )
 
-    def evaluate_discovery_candidate(self, title: str, content: str, url: str) -> dict:
+    def evaluate_discovery_candidate(
+        self, title: str, content: str, url: str, *, community: bool = False
+    ) -> dict:
         if is_obvious_junk(title, content, url) or not passes_keyword_gate(title, content, url):
             reason = (
                 "일반 에너지·친환경 키워드만 있음"
@@ -138,7 +142,10 @@ class GeminiClient(LLMClient):
                 "importance": "low",
                 "confidence": 0.9,
             }
-        system = _load_prompt("discovery_evaluate_v1.md")
+        prompt_name = (
+            "discovery_evaluate_community_v1.md" if community else "discovery_evaluate_v1.md"
+        )
+        system = _load_prompt(prompt_name)
         user = f"URL: {url}\n제목: {title}\n\n본문:\n{content[:12000]}"
         return self._generate_json_korean(
             self.summary_model,
@@ -228,7 +235,9 @@ class MockLLMClient(LLMClient):
             "confidence": 0.75,
         }
 
-    def evaluate_discovery_candidate(self, title: str, content: str, url: str) -> dict:
+    def evaluate_discovery_candidate(
+        self, title: str, content: str, url: str, *, community: bool = False
+    ) -> dict:
         relevant = self._looks_ev_related(title, content, url)
         if not relevant:
             return {
@@ -240,13 +249,14 @@ class MockLLMClient(LLMClient):
                 "importance": "low",
                 "confidence": 0.4,
             }
+        prefix = "커뮤니티 의견·미검증 — " if community else ""
         return {
             "is_relevant": True,
             "relevance_reason": "EV/충전 관련 키워드가 포함되어 있습니다.",
-            "summary": f"{title[:120]} — EV·충전 관련 후보 기사입니다.",
+            "summary": f"{prefix}{title[:120]} — EV·충전 관련 {'커뮤니티' if community else ''} 후보입니다.",
             "impact": "충전 인프라·CSMS 운영 관점에서 확인이 필요합니다.",
             "action_items": ["원문 링크 확인", "관련 정책·표준 모니터링"],
-            "importance": "medium",
+            "importance": "low" if community else "medium",
             "confidence": 0.7,
         }
 

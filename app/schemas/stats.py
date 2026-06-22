@@ -9,6 +9,7 @@ class DashboardPostPreview(BaseModel):
     id: str
     title: str
     source_name: str | None
+    source_type: str | None = None
     board_type: BoardType
     status: PostStatus
     importance: Importance
@@ -44,3 +45,4 @@ class DashboardStatsResponse(BaseModel):
     latest_report: DashboardLatestReport | None
     trusted_preview: list[DashboardPostPreview]
     discovery_preview: list[DashboardPostPreview]
+    community_voices_preview: list[DashboardPostPreview] = []

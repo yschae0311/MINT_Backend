@@ -3,11 +3,33 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import hash_password
-from app.models.enums import UserRole
+from app.models.enums import SourceType, TrustLevel, UserRole
 from app.models.organization import Organization
+from app.models.source import Source
 from app.models.user import User
 
 settings = get_settings()
+
+COMMUNITY_SOURCE_SEEDS = (
+    {
+        "name": "Reddit r/electricvehicles",
+        "url": "https://www.reddit.com/r/electricvehicles/",
+        "source_type": SourceType.reddit,
+        "category": "커뮤니티/현장",
+    },
+    {
+        "name": "Reddit r/evcharging",
+        "url": "https://www.reddit.com/r/evcharging/",
+        "source_type": SourceType.reddit,
+        "category": "커뮤니티/현장",
+    },
+    {
+        "name": "Reddit r/OCPP",
+        "url": "https://www.reddit.com/r/OCPP/",
+        "source_type": SourceType.reddit,
+        "category": "커뮤니티/현장",
+    },
+)
 
 
 def seed_defaults(db: Session) -> None:
@@ -28,4 +50,28 @@ def seed_defaults(db: Session) -> None:
             is_active=True,
         )
         db.add(user)
+
+    for seed in COMMUNITY_SOURCE_SEEDS:
+        exists = db.scalar(
+            select(Source).where(
+                Source.organization_id == org.id,
+                Source.url == seed["url"],
+            )
+        )
+        if exists:
+            continue
+        db.add(
+            Source(
+                organization_id=org.id,
+                name=seed["name"],
+                url=seed["url"],
+                source_type=seed["source_type"],
+                category=seed["category"],
+                trust_level=TrustLevel.low,
+                reliability_score=45,
+                auto_publish=False,
+                is_active=True,
+            )
+        )
+
     db.commit()

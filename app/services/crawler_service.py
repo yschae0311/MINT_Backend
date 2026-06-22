@@ -18,6 +18,16 @@ from app.models.enums import BoardType, CreatedBy, Importance, PostStatus, Sourc
 from app.models.post import Post
 from app.models.source import Source
 from app.schemas.source import CrawlResult
+from app.services.community_sources import (
+    COMMUNITY_MIN_CONTENT_LEN,
+    COMMUNITY_SOURCE_TYPES,
+    REDDIT_REQUEST_DELAY_SEC,
+    REDDIT_USER_AGENT,
+    extract_forum_article_links,
+    is_community_source_type,
+    reddit_listing_json_url,
+    reddit_post_url,
+)
 from app.services.crawl_skip_stats import CrawlSkipStats, classify_eval_error
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
@@ -41,6 +51,7 @@ class CrawlerService:
         self.ai_judge_on_crawl = True
         self.fetch_retries = 3
         self.discovery_max_candidates = 15
+        self.community_max_candidates = 10
         # 너무 짧은 텍스트/템플릿성 문구는 저장하지 않기 위한 최소 조건
         self.min_content_len = 220
         self._skip_href = re.compile(
@@ -69,12 +80,53 @@ class CrawlerService:
         assert last_error is not None
         raise last_error
 
+    def _is_community_source(self, source: Source) -> bool:
+        return is_community_source_type(source.source_type)
+
+    def _min_content_len_for(self, source: Source) -> int:
+        if self._is_community_source(source):
+            return COMMUNITY_MIN_CONTENT_LEN
+        return self.min_content_len
+
+    def _fetch_reddit_json(self, url: str) -> httpx.Response:
+        headers = {
+            **_DEFAULT_HEADERS,
+            "User-Agent": REDDIT_USER_AGENT,
+            "Accept": "application/json",
+        }
+        last_error: Exception | None = None
+        for attempt in range(self.fetch_retries):
+            try:
+                with httpx.Client(
+                    timeout=self.timeout,
+                    follow_redirects=True,
+                    headers=headers,
+                ) as client:
+                    resp = client.get(url)
+                    if resp.status_code == 429:
+                        time.sleep(REDDIT_REQUEST_DELAY_SEC * (attempt + 2))
+                        continue
+                    resp.raise_for_status()
+                    return resp
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+                last_error = exc
+                if attempt + 1 < self.fetch_retries:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+        assert last_error is not None
+        raise last_error
+
     def crawl_source(self, source_id: UUID, organization_id: UUID) -> CrawlResult:
         source = self.db.get(Source, source_id)
         if not source or source.organization_id != organization_id:
             raise NotFoundError("Source not found")
         if not source.is_active:
             raise BadRequestError("Source is inactive")
+
+        # 커뮤니티 소스는 중요 게시판 크롤 대신 탐문 파이프라인만 사용
+        if self._is_community_source(source):
+            return self.crawl_source_to_discovery(source_id, organization_id)
 
         if source.source_type == SourceType.rss:
             created, skipped = self._crawl_rss(source)
@@ -104,7 +156,11 @@ class CrawlerService:
             raise BadRequestError("Source is inactive")
 
         stats = CrawlSkipStats()
-        if source.source_type == SourceType.rss:
+        if source.source_type == SourceType.reddit:
+            created, skipped = self._crawl_discovery_reddit(source, stats)
+        elif source.source_type == SourceType.community_forum:
+            created, skipped = self._crawl_discovery_community_forum(source, stats)
+        elif source.source_type == SourceType.rss:
             created, skipped = self._crawl_discovery_rss(source, stats)
         elif source.source_type in (SourceType.news_page, SourceType.notice_page):
             created, skipped = self._crawl_discovery_list_page(source, stats)
@@ -122,6 +178,77 @@ class CrawlerService:
             error_sample=stats.error_sample,
         )
 
+    def _crawl_discovery_reddit(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
+        json_url = reddit_listing_json_url(source.url, limit=self.community_max_candidates)
+        try:
+            resp = self._fetch_reddit_json(json_url)
+            payload = resp.json()
+        except Exception as exc:
+            logger.warning("Reddit fetch failed for %s: %s", source.url, exc)
+            stats.add("fetch_failed", sample=str(exc))
+            return 0, 0
+
+        children = (payload.get("data") or {}).get("children") or []
+        created = skipped = 0
+        for i, child in enumerate(children[: self.community_max_candidates]):
+            if i > 0:
+                time.sleep(REDDIT_REQUEST_DELAY_SEC)
+
+            data = child.get("data") or {}
+            title = (data.get("title") or "").strip()
+            permalink = data.get("permalink") or ""
+            post_url = reddit_post_url(permalink) if permalink else (data.get("url") or "").strip()
+            if not title or not post_url:
+                skipped += 1
+                stats.add("no_url")
+                continue
+
+            selftext = (data.get("selftext") or "").strip()
+            content = selftext if len(selftext) >= COMMUNITY_MIN_CONTENT_LEN else f"{title}\n\n{selftext}".strip()
+            if len(content) < COMMUNITY_MIN_CONTENT_LEN:
+                content = f"{title}\n\n(Reddit 게시글 — 본문이 짧거나 링크 공유입니다.)"
+
+            published = None
+            created_utc = data.get("created_utc")
+            if created_utc:
+                published = datetime.fromtimestamp(float(created_utc), tz=timezone.utc)
+
+            ok, reason = self._process_discovery_candidate(
+                source, title, post_url, content, published, stats
+            )
+            if ok:
+                created += 1
+            else:
+                skipped += 1
+                stats.add(reason or "other")
+        return created, skipped
+
+    def _crawl_discovery_community_forum(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
+        resp = self._fetch_url(source.url)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        candidates = extract_forum_article_links(soup, source.url, skip_href=self._skip_href)
+        if not candidates:
+            candidates = self._extract_article_links(soup, source.url)
+
+        created = skipped = 0
+        if not candidates:
+            return self._crawl_discovery_single_page(source, stats, soup=soup)
+
+        for title, url in candidates[: self.community_max_candidates]:
+            try:
+                content = self._fetch_article_text(url, source.source_type)
+            except Exception:
+                skipped += 1
+                stats.add("fetch_failed")
+                continue
+            ok, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
+            if ok:
+                created += 1
+            else:
+                skipped += 1
+                stats.add(reason or "other")
+        return created, skipped
+
     def _crawl_discovery_rss(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
         feed = feedparser.parse(source.url)
         created = skipped = 0
@@ -135,7 +262,8 @@ class CrawlerService:
 
             content = entry.get("summary") or entry.get("description") or ""
             content = self._strip_html(content)
-            if len(content) < self.min_content_len:
+            min_len = self._min_content_len_for(source)
+            if len(content) < min_len:
                 try:
                     content = self._fetch_article_text(url, source.source_type)
                 except Exception:
@@ -248,9 +376,10 @@ class CrawlerService:
     ) -> tuple[bool, str | None]:
         title = (title or "").strip()[:512]
         content = (content or "").strip()
+        min_len = self._min_content_len_for(source)
         if not title or len(title) < 2:
             return False, "title_invalid"
-        if len(content) < self.min_content_len:
+        if len(content) < min_len:
             return False, "content_short"
 
         if not passes_keyword_gate(title, content, url):
@@ -266,7 +395,9 @@ class CrawlerService:
 
         try:
             client = get_llm_client()
-            evaluation = client.evaluate_discovery_candidate(title, content, url)
+            evaluation = client.evaluate_discovery_candidate(
+                title, content, url, community=self._is_community_source(source)
+            )
         except Exception as exc:
             reason = classify_eval_error(exc)
             logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
@@ -320,7 +451,9 @@ class CrawlerService:
                 existing.status = PostStatus.pending
                 existing.created_by = CreatedBy.ai_discovery
                 existing.importance = importance
-                self._attach_discovery_ai_output(existing, evaluation)
+                self._attach_discovery_ai_output(
+                    existing, evaluation, community=self._is_community_source(source)
+                )
                 return True, None
             return False, "duplicate"
 
@@ -342,10 +475,12 @@ class CrawlerService:
         )
         self.db.add(post)
         self.db.flush()
-        self._attach_discovery_ai_output(post, evaluation)
+        self._attach_discovery_ai_output(post, evaluation, community=self._is_community_source(source))
         return True, None
 
-    def _attach_discovery_ai_output(self, post: Post, evaluation: dict) -> None:
+    def _attach_discovery_ai_output(
+        self, post: Post, evaluation: dict, *, community: bool = False
+    ) -> None:
         imp_raw = evaluation.get("importance", "medium")
         try:
             importance = Importance(imp_raw)
@@ -354,6 +489,7 @@ class CrawlerService:
 
         client = get_llm_client()
         model_name = getattr(client, "summary_model", "mock")
+        prompt_version = "community_v1" if community else "discovery_v2"
         output = AIOutput(
             post_id=post.id,
             summary=evaluation.get("summary", ""),
@@ -362,7 +498,7 @@ class CrawlerService:
             importance=importance,
             confidence=evaluation.get("confidence"),
             model=model_name,
-            prompt_version="discovery_v2",
+            prompt_version=prompt_version,
         )
         post.importance = importance
         self.db.add(output)
@@ -452,7 +588,7 @@ class CrawlerService:
         - news_page/notice_page 는 article/main 안쪽 텍스트를 우선 사용
         - 그 외는 문서 전체 텍스트(이미 nav/footer 등은 제거됨) 사용
         """
-        if source_type in (SourceType.news_page, SourceType.notice_page):
+        if source_type in (SourceType.news_page, SourceType.notice_page, SourceType.community_forum):
             container = soup.find("article") or soup.find("main") or soup.body
         else:
             container = soup
@@ -477,7 +613,7 @@ class CrawlerService:
         content = (content or "").strip()
         if not title or len(title) < 2:
             return False
-        if len(content) < self.min_content_len:
+        if len(content) < self._min_content_len_for(source):
             return False
 
         if not passes_keyword_gate(title, content, url or ""):
@@ -487,7 +623,9 @@ class CrawlerService:
         evaluation: dict | None = None
         if self.ai_judge_on_crawl:
             try:
-                evaluation = get_llm_client().evaluate_discovery_candidate(title, content, url or "")
+                evaluation = get_llm_client().evaluate_discovery_candidate(
+                    title, content, url or "", community=self._is_community_source(source)
+                )
             except Exception as exc:
                 logger.warning("Crawl AI evaluation failed for %s: %s", url, exc)
                 return False
@@ -518,7 +656,9 @@ class CrawlerService:
                         existing.importance = Importance(imp_raw)
                     except ValueError:
                         existing.importance = Importance.medium
-                    self._attach_discovery_ai_output(existing, evaluation)
+                    self._attach_discovery_ai_output(
+                        existing, evaluation, community=self._is_community_source(source)
+                    )
                     if (
                         allow_auto_publish
                         and source.auto_publish
@@ -555,7 +695,7 @@ class CrawlerService:
                 post.importance = Importance(imp_raw)
             except ValueError:
                 post.importance = Importance.medium
-            self._attach_discovery_ai_output(post, evaluation)
+            self._attach_discovery_ai_output(post, evaluation, community=self._is_community_source(source))
             if (
                 allow_auto_publish
                 and source.auto_publish
@@ -593,7 +733,12 @@ class CrawlerService:
 
     def crawl_all_active(self, organization_id: UUID) -> list[CrawlResult]:
         sources = self.db.scalars(
-            select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
+            select(Source).where(
+                Source.organization_id == organization_id,
+                Source.is_active.is_(True),
+                Source.source_type.not_in(tuple(COMMUNITY_SOURCE_TYPES)),
+                Source.trust_level != TrustLevel.low,
+            )
         ).all()
         results = []
         for source in sources:
@@ -601,13 +746,76 @@ class CrawlerService:
         return results
 
     def crawl_all_active_to_discovery(
-        self, organization_id: UUID, *, trusted_only: bool = True
+        self, organization_id: UUID, *, trusted_only: bool = True, community_only: bool = False
     ) -> list[CrawlResult]:
         q = select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
-        if trusted_only:
+        if community_only:
+            q = q.where(Source.source_type.in_(tuple(COMMUNITY_SOURCE_TYPES)))
+        elif trusted_only:
             q = q.where(Source.trust_level == TrustLevel.high)
         sources = self.db.scalars(q).all()
         results: list[CrawlResult] = []
         for source in sources:
             results.append(self._crawl_source_safe(source, organization_id, to_discovery=True))
         return results
+
+    def submit_community_url(
+        self,
+        organization_id: UUID,
+        url: str,
+        *,
+        title: str | None = None,
+        note: str = "",
+    ) -> tuple[bool, str | None]:
+        """Fetch a single community URL and enqueue it for discovery review."""
+        stats = CrawlSkipStats()
+        manual_source = self.db.scalar(
+            select(Source).where(
+                Source.organization_id == organization_id,
+                Source.source_type == SourceType.community_forum,
+                Source.name == "__community_submit__",
+            )
+        )
+        if not manual_source:
+            manual_source = Source(
+                organization_id=organization_id,
+                name="__community_submit__",
+                url="manual://community-submit",
+                source_type=SourceType.community_forum,
+                category="커뮤니티/현장",
+                trust_level=TrustLevel.low,
+                reliability_score=45,
+                auto_publish=False,
+                is_active=False,
+            )
+            self.db.add(manual_source)
+            self.db.flush()
+
+        page_title = (title or "").strip() or url
+        try:
+            content = self._fetch_article_text(url, SourceType.community_forum)
+        except Exception as exc:
+            logger.warning("Community URL fetch failed for %s: %s", url, exc)
+            return False, "fetch_failed"
+
+        if note:
+            content = f"{note.strip()}\n\n{content}".strip()
+
+        ok, reason = self._process_discovery_candidate(
+            manual_source, page_title, url, content, None, stats
+        )
+        if ok:
+            content_hash = hashlib.sha256(f"{url}|{page_title}".encode()).hexdigest()
+            post = self.db.scalar(
+                select(Post).where(
+                    Post.organization_id == organization_id,
+                    Post.content_hash == content_hash,
+                )
+            )
+            if post:
+                post.created_by = CreatedBy.user_submitted
+            self.db.commit()
+            return True, None
+
+        self.db.rollback()
+        return False, reason or "rejected"
