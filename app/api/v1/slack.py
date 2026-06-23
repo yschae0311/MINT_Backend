@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.permissions import require_admin
 from app.core.security import get_current_user
 from app.models.user import User
 from app.schemas.slack import (
@@ -19,14 +20,14 @@ router = APIRouter()
 
 
 @router.get("/webhooks", response_model=list[SlackWebhookRead])
-def list_webhooks(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_webhooks(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return SlackService(db).list_webhooks(user.organization_id)
 
 
 @router.post("/webhooks", response_model=SlackWebhookRead)
 def create_webhook(
     data: SlackWebhookCreate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return SlackService(db).create_webhook(user.organization_id, data)
@@ -36,7 +37,7 @@ def create_webhook(
 def update_webhook(
     webhook_id: UUID,
     data: SlackWebhookUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return SlackService(db).update_webhook(webhook_id, user.organization_id, data)
@@ -45,7 +46,7 @@ def update_webhook(
 @router.delete("/webhooks/{webhook_id}", status_code=204)
 def delete_webhook(
     webhook_id: UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     SlackService(db).delete_webhook(webhook_id, user.organization_id)
@@ -54,7 +55,7 @@ def delete_webhook(
 @router.post("/test", response_model=SlackTestResponse)
 def test_slack(
     data: SlackTestRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return SlackService(db).send_test(user.organization_id, data.message)

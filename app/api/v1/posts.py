@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.permissions import require_admin
 from app.core.security import get_current_user
 from app.models.enums import BoardType, Importance, PostStatus
 from app.models.user import User
@@ -65,7 +66,7 @@ def original_preview(
 @router.post("", response_model=PostRead)
 def create_post(
     data: PostCreate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return PostService(db).create_post(user.organization_id, data)
@@ -75,32 +76,32 @@ def create_post(
 def update_post(
     post_id: UUID,
     data: PostUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return PostService(db).update_post(post_id, user.organization_id, data)
 
 
 @router.post("/{post_id}/approve", response_model=PostRead)
-def approve_post(post_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def approve_post(post_id: UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return PostService(db).approve(post_id, user.organization_id, user)
 
 
 @router.post("/{post_id}/hide", response_model=PostRead)
-def hide_post(post_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def hide_post(post_id: UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return PostService(db).hide(post_id, user.organization_id, user)
 
 
 @router.post("/{post_id}/delete", response_model=PostRead)
-def delete_post(post_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_post(post_id: UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return PostService(db).delete_post(post_id, user.organization_id, user)
 
 
 @router.post("/{post_id}/promote", response_model=PostRead)
-def promote_post(post_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def promote_post(post_id: UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return PostService(db).promote(post_id, user.organization_id, user)
 
 
 @router.post("/{post_id}/summarize", response_model=AIOutputRead)
-def summarize_post(post_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def summarize_post(post_id: UUID, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return AIService(db).summarize_post(post_id, user.organization_id)

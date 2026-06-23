@@ -8,6 +8,18 @@ class UserRole(str, enum.Enum):
     viewer = "viewer"
 
 
+class AccountApprovalStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+
+
+class InquiryStatus(str, enum.Enum):
+    open = "open"
+    answered = "answered"
+    closed = "closed"
+
+
 class SourceType(str, enum.Enum):
     rss = "rss"
     webpage = "webpage"

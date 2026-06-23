@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.permissions import require_admin
 from app.core.security import get_current_user
 from app.models.enums import JobType
 from app.models.user import User
@@ -35,7 +36,7 @@ def get_report(
 @router.post("/generate", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
 def generate_report(
     data: ReportGenerateRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     label = (
@@ -67,7 +68,7 @@ def generate_report(
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_report(
     report_id: UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     ReportService(db).delete_report(report_id, user.organization_id)
@@ -76,7 +77,7 @@ def delete_report(
 @router.post("/{report_id}/send-slack", response_model=SlackTestResponse)
 def send_report_slack(
     report_id: UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return SlackService(db).send_report(report_id, user.organization_id)

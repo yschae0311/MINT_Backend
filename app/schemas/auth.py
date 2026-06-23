@@ -2,7 +2,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models.enums import UserRole
+from app.models.enums import AccountApprovalStatus, UserRole
 from app.schemas.common import ORMBase
 
 
@@ -22,10 +22,16 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class RegisterResponse(BaseModel):
+    message: str
+    status: str = "pending"
+
+
 class UserRead(ORMBase):
     id: UUID
     organization_id: UUID
     email: str
     name: str
     role: UserRole
+    approval_status: AccountApprovalStatus
     is_active: bool

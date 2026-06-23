@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.models.enums import AccountApprovalStatus
 from app.models.user import User
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -53,6 +54,8 @@ def get_current_user(
     user = db.get(User, UUID(user_id))
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if user.approval_status != AccountApprovalStatus.approved:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not approved")
     return user
 
 

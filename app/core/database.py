@@ -67,6 +67,12 @@ def _migrate_pg_columns() -> None:
                 "ADD COLUMN IF NOT EXISTS illustration_url VARCHAR(512)"
             )
         )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".users '
+                "ADD COLUMN IF NOT EXISTS approval_status VARCHAR(16) DEFAULT 'approved'"
+            )
+        )
     logger.debug('Ensured background_jobs.status column width')
 
 
@@ -81,6 +87,17 @@ def _migrate_sqlite_columns() -> None:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE daily_reports ADD COLUMN illustration_url VARCHAR(512)"))
         logger.info("Added daily_reports.illustration_url column (sqlite)")
+    if "users" in inspector.get_table_names():
+        user_cols = {c["name"] for c in inspector.get_columns("users")}
+        if "approval_status" not in user_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE users ADD COLUMN approval_status VARCHAR(16) "
+                        "NOT NULL DEFAULT 'approved'"
+                    )
+                )
+            logger.info("Added users.approval_status column (sqlite)")
 
 
 def init_db() -> None:

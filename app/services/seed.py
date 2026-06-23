@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import hash_password
-from app.models.enums import SourceType, TrustLevel, UserRole
+from app.models.enums import AccountApprovalStatus, SourceType, TrustLevel, UserRole
 from app.models.organization import Organization
 from app.models.source import Source
 from app.models.user import User
@@ -151,6 +151,7 @@ def seed_defaults(db: Session) -> None:
             password_hash=hash_password(settings.seed_admin_password),
             name=settings.seed_admin_name,
             role=UserRole.admin,
+            approval_status=AccountApprovalStatus.approved,
             is_active=True,
         )
         db.add(user)

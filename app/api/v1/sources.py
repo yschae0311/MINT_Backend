@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.exceptions import NotFoundError
+from app.core.permissions import require_admin
 from app.core.security import get_current_user
 from app.models.enums import JobType
 from app.models.source import Source
@@ -39,7 +40,7 @@ def get_collection_settings(user: User = Depends(get_current_user), db: Session 
 @router.patch("/collection-settings", response_model=CollectionSettingsRead)
 def update_collection_settings(
     data: CollectionSettingsUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return OrgSettingsService(db).update_collection_settings(
@@ -56,7 +57,7 @@ def list_sources(user: User = Depends(get_current_user), db: Session = Depends(g
 @router.post("", response_model=SourceRead)
 def create_source(
     data: SourceCreate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return SourceService(db).create_source(user.organization_id, data)
@@ -65,7 +66,7 @@ def create_source(
 @router.post("/submit-url", response_model=CommunityUrlSubmitResult)
 def submit_community_url(
     data: CommunityUrlSubmit,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     accepted, reason = CrawlerService(db).submit_community_url(
@@ -85,7 +86,7 @@ def submit_community_url(
 def crawl_all_to_discovery(
     trusted_only: bool = True,
     community_only: bool = False,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     jobs = JobService(db)
@@ -122,7 +123,7 @@ def get_source(
 def update_source(
     source_id: UUID,
     data: SourceUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     return SourceService(db).update_source(source_id, user.organization_id, data)
@@ -131,7 +132,7 @@ def update_source(
 @router.delete("/{source_id}", status_code=204)
 def delete_source(
     source_id: UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     SourceService(db).delete_source(source_id, user.organization_id)
@@ -140,7 +141,7 @@ def delete_source(
 @router.post("/{source_id}/crawl", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
 def crawl_source(
     source_id: UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     source = db.get(Source, source_id)
@@ -174,7 +175,7 @@ def crawl_source(
 )
 def crawl_source_to_discovery(
     source_id: UUID,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     source = db.get(Source, source_id)

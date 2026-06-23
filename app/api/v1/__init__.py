@@ -1,10 +1,12 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, chat, health, jobs, posts, reports, search, slack, sources, stats
+from app.api.v1 import auth, chat, health, inquiries, jobs, posts, reports, search, slack, sources, stats, users
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_router.include_router(users.router, prefix="/users", tags=["users"])
+api_router.include_router(inquiries.router, prefix="/inquiries", tags=["inquiries"])
 api_router.include_router(sources.router, prefix="/sources", tags=["sources"])
 api_router.include_router(posts.router, prefix="/posts", tags=["posts"])
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
