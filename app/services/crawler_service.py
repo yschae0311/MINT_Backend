@@ -29,6 +29,11 @@ from app.services.community_sources import (
     reddit_old_post_url,
 )
 from app.services.crawl_skip_stats import CrawlSkipStats, classify_eval_error
+from app.services.gov_sources import (
+    extract_gov_article_links,
+    extract_gov_article_text,
+    is_gov_notice_host,
+)
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 from app.services.reddit_client import (
@@ -61,9 +66,10 @@ class CrawlerService:
         # 너무 짧은 텍스트/템플릿성 문구는 저장하지 않기 위한 최소 조건
         self.min_content_len = 220
         self._skip_href = re.compile(
-            r"(javascript:|mailto:|#|/css/|\.pdf$|login|logout|signup|search)",
+            r"(javascript:|mailto:|#|/css/|\.pdf$|/login(?:/|$)|logout|signup|/search(?:/|$|\?))",
             re.I,
         )
+        self.trusted_list_max_candidates = 15
 
     def _fetch_url(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
@@ -138,6 +144,8 @@ class CrawlerService:
 
         if source.source_type == SourceType.rss:
             created, skipped = self._crawl_rss(source)
+        elif source.source_type in (SourceType.news_page, SourceType.notice_page):
+            created, skipped = self._crawl_trusted_list_page(source)
         else:
             created, skipped = self._crawl_webpage(source)
 
@@ -372,10 +380,17 @@ class CrawlerService:
             tag.decompose()
         text = extract_community_article_text(soup, url)
         if not text:
+            text = extract_gov_article_text(soup, url)
+        if not text:
             text = self._extract_main_text(soup, source_type)
         return re.sub(r"\s+", " ", text).strip()[:8000]
 
     def _extract_article_links(self, soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:
+        if is_gov_notice_host(base_url):
+            gov_links = extract_gov_article_links(soup, base_url, skip_href=self._skip_href)
+            if gov_links:
+                return gov_links
+
         container = soup.find("article") or soup.find("main") or soup.body
         if not container:
             return []
@@ -576,6 +591,27 @@ class CrawlerService:
                 created_by=created_by,
                 revive_deleted=revive_deleted,
             ):
+                created += 1
+            else:
+                skipped += 1
+        return created, skipped
+
+    def _crawl_trusted_list_page(self, source: Source) -> tuple[int, int]:
+        resp = self._fetch_url(source.url)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        candidates = self._extract_article_links(soup, source.url)
+
+        if not candidates:
+            return self._crawl_webpage(source)
+
+        created = skipped = 0
+        for title, url in candidates[: self.trusted_list_max_candidates]:
+            try:
+                content = self._fetch_article_text(url, source.source_type)
+            except Exception:
+                skipped += 1
+                continue
+            if self._save_post(source, title, url, content, None):
                 created += 1
             else:
                 skipped += 1

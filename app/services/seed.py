@@ -45,6 +45,46 @@ COMMUNITY_SOURCE_SEEDS = (
 )
 
 
+# 보조금·사업자 선정·고시 등 공식 정책 소스 (중요 파이프라인 / high trust)
+TRUSTED_POLICY_SOURCE_SEEDS = (
+    {
+        "name": "정책브리핑 정책뉴스",
+        "url": "https://www.korea.kr/rss/policy.xml",
+        "source_type": SourceType.rss,
+        "category": "정책/규제",
+        "reliability_score": 95,
+    },
+    {
+        "name": "정책브리핑 부처 브리핑",
+        "url": "https://www.korea.kr/rss/ebriefing.xml",
+        "source_type": SourceType.rss,
+        "category": "정책/규제",
+        "reliability_score": 96,
+    },
+    {
+        "name": "환경부 전기차·충전 공지",
+        "url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=29",
+        "source_type": SourceType.notice_page,
+        "category": "정책/규제",
+        "reliability_score": 98,
+    },
+    {
+        "name": "환경부 고시·훈령·예규",
+        "url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=67",
+        "source_type": SourceType.notice_page,
+        "category": "정책/규제",
+        "reliability_score": 97,
+    },
+    {
+        "name": "환경부 입찰·공고",
+        "url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=39",
+        "source_type": SourceType.notice_page,
+        "category": "정책/규제",
+        "reliability_score": 94,
+    },
+)
+
+
 def _deactivate_reddit_sources(db: Session, organization_id) -> None:
     """Reddit listing is blocked from most server IPs; keep rows but disable auto-crawl."""
     rows = db.scalars(
@@ -56,6 +96,44 @@ def _deactivate_reddit_sources(db: Session, organization_id) -> None:
     ).all()
     for row in rows:
         row.is_active = False
+
+
+def _deactivate_broken_ev_portal_source(db: Session, organization_id) -> None:
+    """ev.or.kr 공지 목록은 JS 렌더링이라 서버 크롤이 불가 — 비활성화."""
+    row = db.scalar(
+        select(Source).where(
+            Source.organization_id == organization_id,
+            Source.url == "https://ev.or.kr/nportal/partcptn/initNoticeAction.do",
+            Source.is_active.is_(True),
+        )
+    )
+    if row:
+        row.is_active = False
+
+
+def _seed_sources(db: Session, organization_id, seeds: tuple, *, low_trust: bool) -> None:
+    for seed in seeds:
+        exists = db.scalar(
+            select(Source).where(
+                Source.organization_id == organization_id,
+                Source.url == seed["url"],
+            )
+        )
+        if exists:
+            continue
+        db.add(
+            Source(
+                organization_id=organization_id,
+                name=seed["name"],
+                url=seed["url"],
+                source_type=seed["source_type"],
+                category=seed["category"],
+                trust_level=TrustLevel.low if low_trust else TrustLevel.high,
+                reliability_score=seed.get("reliability_score", 45 if low_trust else 85),
+                auto_publish=not low_trust,
+                is_active=True,
+            )
+        )
 
 
 def seed_defaults(db: Session) -> None:
@@ -78,28 +156,9 @@ def seed_defaults(db: Session) -> None:
         db.add(user)
 
     _deactivate_reddit_sources(db, org.id)
+    _deactivate_broken_ev_portal_source(db, org.id)
 
-    for seed in COMMUNITY_SOURCE_SEEDS:
-        exists = db.scalar(
-            select(Source).where(
-                Source.organization_id == org.id,
-                Source.url == seed["url"],
-            )
-        )
-        if exists:
-            continue
-        db.add(
-            Source(
-                organization_id=org.id,
-                name=seed["name"],
-                url=seed["url"],
-                source_type=seed["source_type"],
-                category=seed["category"],
-                trust_level=TrustLevel.low,
-                reliability_score=45,
-                auto_publish=False,
-                is_active=True,
-            )
-        )
+    _seed_sources(db, org.id, COMMUNITY_SOURCE_SEEDS, low_trust=True)
+    _seed_sources(db, org.id, TRUSTED_POLICY_SOURCE_SEEDS, low_trust=False)
 
     db.commit()
