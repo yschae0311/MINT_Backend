@@ -297,11 +297,14 @@ class MockLLMClient(LLMClient):
     def classify_chat_question(self, question: str) -> dict:
         blob = question.lower()
         if any(h in blob for h in self._EV_HINTS):
-            return {"is_allowed": True, "reason": "EV/충전 관련 키워드"}
-        meta = ("mint", "뭐 할", "도움", "사용법", "기능", "게시판", "리포트")
+            return {"route": "ev", "reason": "EV/충전 관련 키워드"}
+        meta = ("mint", "뭐 할", "도움", "사용법", "기능", "게시판", "리포트", "챗봇")
         if any(h in blob for h in meta):
-            return {"is_allowed": True, "reason": "MINT 메타 질문"}
-        return {"is_allowed": False, "reason": "EV/충전 범위 밖 질문"}
+            return {"route": "meta", "reason": "MINT 메타 질문"}
+        off_topic = ("날씨", "레시피", "연예인", "로또", "운세", "연애 상담")
+        if any(h in question for h in off_topic):
+            return {"route": "off_topic", "reason": "MINT 범위 밖 주제"}
+        return {"route": "general", "reason": "일반 질문"}
 
     def answer_question_general(self, question: str) -> str:
         return (
