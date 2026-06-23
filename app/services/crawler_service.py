@@ -24,6 +24,7 @@ from app.services.community_sources import (
     REDDIT_REQUEST_DELAY_SEC,
     REDDIT_USER_AGENT,
     extract_forum_article_links,
+    extract_community_article_text,
     is_community_source_type,
     reddit_old_post_url,
 )
@@ -369,7 +370,9 @@ class CrawlerService:
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "noscript"]):
             tag.decompose()
-        text = self._extract_main_text(soup, source_type)
+        text = extract_community_article_text(soup, url)
+        if not text:
+            text = self._extract_main_text(soup, source_type)
         return re.sub(r"\s+", " ", text).strip()[:8000]
 
     def _extract_article_links(self, soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:

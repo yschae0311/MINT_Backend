@@ -51,6 +51,12 @@ def _migrate_pg_columns() -> None:
         )
         conn.execute(
             text(
+                f'ALTER TABLE "{_schema}".sources '
+                "ALTER COLUMN source_type TYPE VARCHAR(32)"
+            )
+        )
+        conn.execute(
+            text(
                 f'ALTER TABLE "{_schema}".organizations '
                 "ADD COLUMN IF NOT EXISTS discovery_pending_retention_days INTEGER"
             )

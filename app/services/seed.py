@@ -10,26 +10,52 @@ from app.models.user import User
 
 settings = get_settings()
 
+# Reddit는 EC2 등 서버 IP에서 차단됨 — 기본 시드는 국내 포럼(HTML 크롤) 위주.
 COMMUNITY_SOURCE_SEEDS = (
     {
-        "name": "Reddit r/electricvehicles",
-        "url": "https://www.reddit.com/r/electricvehicles/",
-        "source_type": SourceType.reddit,
+        "name": "클리앙 모두의공원",
+        "url": "https://www.clien.net/service/board/park",
+        "source_type": SourceType.community_forum,
         "category": "커뮤니티/현장",
     },
     {
-        "name": "Reddit r/evcharging",
-        "url": "https://www.reddit.com/r/evcharging/",
-        "source_type": SourceType.reddit,
+        "name": "클리앙 사용기",
+        "url": "https://www.clien.net/service/board/use",
+        "source_type": SourceType.community_forum,
         "category": "커뮤니티/현장",
     },
     {
-        "name": "Reddit r/OCPP",
-        "url": "https://www.reddit.com/r/OCPP/",
-        "source_type": SourceType.reddit,
+        "name": "보배드림 자동차뉴스",
+        "url": "https://www.bobaedream.co.kr/list?code=cnews",
+        "source_type": SourceType.community_forum,
+        "category": "커뮤니티/현장",
+    },
+    {
+        "name": "보배드림 국산차",
+        "url": "https://www.bobaedream.co.kr/list?code=national",
+        "source_type": SourceType.community_forum,
+        "category": "커뮤니티/현장",
+    },
+    {
+        "name": "보배드림 수입차",
+        "url": "https://www.bobaedream.co.kr/list?code=import",
+        "source_type": SourceType.community_forum,
         "category": "커뮤니티/현장",
     },
 )
+
+
+def _deactivate_reddit_sources(db: Session, organization_id) -> None:
+    """Reddit listing is blocked from most server IPs; keep rows but disable auto-crawl."""
+    rows = db.scalars(
+        select(Source).where(
+            Source.organization_id == organization_id,
+            Source.source_type == SourceType.reddit,
+            Source.is_active.is_(True),
+        )
+    ).all()
+    for row in rows:
+        row.is_active = False
 
 
 def seed_defaults(db: Session) -> None:
@@ -50,6 +76,8 @@ def seed_defaults(db: Session) -> None:
             is_active=True,
         )
         db.add(user)
+
+    _deactivate_reddit_sources(db, org.id)
 
     for seed in COMMUNITY_SOURCE_SEEDS:
         exists = db.scalar(

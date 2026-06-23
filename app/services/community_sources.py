@@ -17,12 +17,18 @@ REDDIT_REQUEST_DELAY_SEC = 2.0
 REDDIT_USER_AGENT = "MINT/1.0 (EV intelligence desk; contact: admin@motrexev.local)"
 
 _FORUM_LINK_PATTERNS = (
-    re.compile(r"/service/board/", re.I),  # clien.net
-    re.compile(r"/board/bbs_(?:list|view)", re.I),  # bobaedream
+    re.compile(r"/service/board/(?!rule|annonce)[^/]+/\d", re.I),  # clien.net posts
+    re.compile(r"/view\?code=", re.I),  # bobaedream.co.kr (new URL scheme)
+    re.compile(r"/board/bbs_(?:list|view)", re.I),  # bobaedream legacy
     re.compile(r"/community/[a-z0-9_-]+/\d", re.I),
     re.compile(r"/forum/", re.I),
     re.compile(r"/thread/", re.I),
     re.compile(r"/posts/\d", re.I),
+)
+
+_FORUM_SKIP_URL = re.compile(
+    r"/service/board/(?:rule|annonce)/|partner_view|code=event_notice|/board/bulletin/list\.php",
+    re.I,
 )
 
 
@@ -167,6 +173,26 @@ def resolve_reddit_rss_credentials(
     return None
 
 
+def extract_community_article_text(soup: BeautifulSoup, url: str) -> str | None:
+    """Site-specific main content extraction for Korean community forums."""
+    host = urlparse(str(url)).netloc.lower()
+    if "clien.net" in host:
+        for selector in (".content_view", ".post_article", ".post_content"):
+            node = soup.select_one(selector)
+            if node:
+                text = node.get_text(separator=" ", strip=True)
+                if len(text) >= 40:
+                    return text
+    if "bobaedream.co.kr" in host:
+        for selector in (".bodyCont", "#print_area .bodyCont", ".content02"):
+            node = soup.select_one(selector)
+            if node:
+                text = node.get_text(separator=" ", strip=True)
+                if len(text) >= 40:
+                    return text
+    return None
+
+
 def extract_forum_article_links(
     soup: BeautifulSoup,
     base_url: str,
@@ -196,6 +222,8 @@ def extract_forum_article_links(
             if parsed.netloc and parsed.netloc != base_host:
                 continue
             if not any(p.search(full_url) for p in _FORUM_LINK_PATTERNS):
+                continue
+            if _FORUM_SKIP_URL.search(full_url):
                 continue
 
             title = anchor.get_text(separator=" ", strip=True)
