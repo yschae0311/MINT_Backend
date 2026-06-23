@@ -2,6 +2,20 @@
 
 MotrexEV Intelligence & News Tracker API (FastAPI).
 
+## Features
+
+| Area | Endpoints / notes |
+|------|-------------------|
+| Auth | JWT register/login, account approval flow |
+| Users & RBAC | Role-based permissions (`admin`, `member`, …) |
+| Inquiries | Sign-up approval Q&A between user and admin |
+| Sources | CRUD for RSS/HTML/Reddit/gov/community feeds |
+| Posts | Trusted & discovery boards, AI summary on posts |
+| Reports | Daily digest generation & PDF export |
+| Slack | Webhook settings & notification dispatch |
+| Jobs | Background crawl/summary tasks (Celery + Beat) |
+| Search / Chat / Stats | Full-text search, Gemini chat, dashboard stats |
+
 ## Quick start
 
 ```bash

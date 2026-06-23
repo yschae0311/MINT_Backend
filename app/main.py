@@ -1,3 +1,7 @@
+"""MINT FastAPI application entrypoint.
+
+Startup: logging, DB init (create_all), default seed data, media dirs.
+"""
 from contextlib import asynccontextmanager
 from pathlib import Path
 

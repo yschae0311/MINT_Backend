@@ -1,3 +1,8 @@
+"""MINT API v1 route registry.
+
+Modules: auth, users, inquiries, sources, posts, reports, slack,
+stats, chat, search, jobs (+ health).
+"""
 from fastapi import APIRouter
 
 from app.api.v1 import auth, chat, health, inquiries, jobs, posts, reports, search, slack, sources, stats, users
