@@ -378,6 +378,37 @@ def classify_existing_posts_task(organization_id: str | None = None, limit: int 
         db.close()
 
 
+@celery_app.task(name="app.workers.tasks.generate_personal_report_job_task")
+def generate_personal_report_job_task(job_id: str, user_id: str, report_date: str | None = None):
+    db = SessionLocal()
+    try:
+        jobs = JobService(db)
+        jobs.start_job(UUID(job_id))
+        if jobs.is_cancelled(UUID(job_id)):
+            return
+        jobs.update_progress(UUID(job_id), 0, 1, "개인 리포트 생성 중…")
+        user = db.get(User, UUID(user_id))
+        if not user:
+            jobs.fail_job(UUID(job_id), "사용자를 찾을 수 없습니다.")
+            return
+        target = date.fromisoformat(report_date) if report_date else _kst_today()
+        report = PersonalReportService(db).generate_for_user(user, target)
+        if jobs.is_cancelled(UUID(job_id)):
+            return
+        if report:
+            jobs.complete_job(UUID(job_id), f"개인 리포트 생성 완료 ({report.report_date})")
+        else:
+            jobs.fail_job(
+                UUID(job_id),
+                "오늘 매칭 기사가 없거나 관심 키워드가 부족합니다.",
+            )
+    except Exception as exc:
+        logger.exception("generate_personal_report_job_task failed job=%s", job_id)
+        JobService(db).fail_job(UUID(job_id), str(exc))
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.workers.tasks.generate_personal_reports_task")
 def generate_personal_reports_task(report_date: str | None = None):
     db = SessionLocal()

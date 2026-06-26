@@ -26,6 +26,7 @@ from app.schemas.personalization import (
     ReviewQueueRead,
     ReviewQueueResolve,
 )
+from app.schemas.report import ReportGenerateRequest
 from app.services.personalization_service import (
     ClassificationService,
     PersonalReportService,
@@ -37,7 +38,7 @@ from app.models.personalization import NewsCategory
 from app.models.personalization import Keyword, PostKeyword, UserKeywordSubscription
 from app.models.post import Post
 from app.models.source import Source
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import BadRequestError, NotFoundError
 
 router = APIRouter()
 
@@ -291,6 +292,44 @@ def latest_personal_report(
     db: Session = Depends(get_db),
 ):
     return PersonalReportService(db).latest(user)
+
+
+@router.post("/personal-reports/generate", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+def generate_personal_report(
+    data: ReportGenerateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.services.job_service import JobService, dispatch_task
+    from app.workers.tasks import generate_personal_report_job_task
+
+    selected = TaxonomyService(db).selected_ids(user.id)
+    if len(selected) < 3:
+        raise BadRequestError("관심 키워드를 3개 이상 선택해야 개인 리포트를 생성할 수 있습니다.")
+
+    label = (
+        f"개인 리포트 생성 · {data.report_date}"
+        if data.report_date
+        else "개인 리포트 생성"
+    )
+    jobs = JobService(db)
+    job = jobs.create_job(
+        user.organization_id,
+        JobType.generate_personal_reports,
+        label,
+        triggered_by=user.id,
+        progress_total=1,
+    )
+    db.commit()
+    report_date = data.report_date.isoformat() if data.report_date else None
+    dispatch_task(
+        generate_personal_report_job_task,
+        str(job.id),
+        str(user.id),
+        report_date,
+        db=db,
+    )
+    return JobRead.model_validate(job)
 
 
 @router.get("/personal-reports/{report_id}", response_model=PersonalReportRead)
