@@ -329,7 +329,7 @@ def classify_posts_job_task(job_id: str, organization_id: str, limit: int = 500)
                 Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
             )
         )
-        posts = list(db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).all())
+        posts = list(db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).unique().all())
         total = len(posts)
         jobs.update_progress(UUID(job_id), 0, max(total, 1), f"0 / {total} 분류 중…")
         ok = 0
@@ -366,7 +366,7 @@ def classify_existing_posts_task(organization_id: str | None = None, limit: int 
         )
         if organization_id:
             q = q.where(Post.organization_id == UUID(organization_id))
-        posts = list(db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).all())
+        posts = list(db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).unique().all())
         for post in posts:
             try:
                 ClassificationService(db).classify_post(post)
