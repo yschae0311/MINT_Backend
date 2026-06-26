@@ -99,6 +99,8 @@ class JobType(str, enum.Enum):
     send_slack_report = "send_slack_report"
     summarize_post = "summarize_post"
     purge_stale_discovery = "purge_stale_discovery"
+    classify_posts = "classify_posts"
+    generate_personal_reports = "generate_personal_reports"
 
 
 class JobStatus(str, enum.Enum):
@@ -107,3 +109,35 @@ class JobStatus(str, enum.Enum):
     success = "success"
     failed = "failed"
     cancelled = "cancelled"
+
+
+class KeywordScope(str, enum.Enum):
+    organization = "organization"
+    personal = "personal"
+
+
+class KeywordStatus(str, enum.Enum):
+    active = "active"
+    candidate = "candidate"
+    archived = "archived"
+
+
+class KeywordMatchMethod(str, enum.Enum):
+    ai = "ai"
+    alias = "alias"
+    custom = "custom"
+    admin = "admin"
+
+
+class ReviewQueueReason(str, enum.Enum):
+    low_confidence = "low_confidence"
+    uncategorized = "uncategorized"
+    no_keywords = "no_keywords"
+    new_keyword = "new_keyword"
+    extraction_failed = "extraction_failed"
+
+
+class ReviewQueueStatus(str, enum.Enum):
+    pending = "pending"
+    resolved = "resolved"
+    excluded = "excluded"

@@ -17,8 +17,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute("ALTER TABLE sources ALTER COLUMN source_type TYPE VARCHAR(32)")
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute("ALTER TABLE sources ALTER COLUMN source_type TYPE VARCHAR(11)")

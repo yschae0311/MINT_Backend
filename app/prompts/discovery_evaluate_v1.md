@@ -24,6 +24,9 @@ MotrexEV 내부 직원을 위한 **EV·전기차 충전 산업** 뉴스 발굴 �
 - is_relevant=false → summary, impact, action_items는 빈 값.
 - is_relevant=true → summary, impact, action_items를 **한국어**로 작성.
 - relevance_reason에 승인/거부 근거를 한 문장으로 명시.
+- is_relevant=true일 때 category와 keywords를 반드시 채우세요.
+- category는 정책/규제, 충전 인프라, CSMS/OCPP, 배터리/에너지, 시장/기업, 기술, 커뮤니티/현장, 기타 중 하나.
+- keywords는 기사 핵심 주제 1~5개(짧은 명사·약어), 각 confidence 포함. 조직에 없는 주제도 기사에서 중요하면 제안하세요.
 
 유효한 JSON만 응답:
 {
@@ -33,5 +36,7 @@ MotrexEV 내부 직원을 위한 **EV·전기차 충전 산업** 뉴스 발굴 �
   "impact": "string",
   "action_items": ["string"],
   "importance": "high|medium|low",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "category": "string",
+  "keywords": [{"name": "string", "confidence": 0.0}]
 }

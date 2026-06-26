@@ -23,6 +23,9 @@ MotrexEV 내부 직원을 위한 **EV·전기차 충전 산업** 커뮤니티·�
 - 단일 유저 경험은 **importance=low**를 기본으로 하세요. 다수가 언급하는 이슈·CPO/정책 직접 관련이면 medium.
 - is_relevant=true일 때 confidence ≥ 0.5 권장. 애매하면 false.
 - is_relevant=false → summary, impact, action_items는 빈 값.
+- is_relevant=true일 때 category와 keywords를 반드시 채우세요.
+- category는 정책/규제, 충전 인프라, CSMS/OCPP, 배터리/에너지, 시장/기업, 기술, 커뮤니티/현장, 기타 중 하나.
+- keywords는 게시글 핵심 주제 1~5개, 각 confidence 포함.
 
 유효한 JSON만 응답:
 {
@@ -32,5 +35,7 @@ MotrexEV 내부 직원을 위한 **EV·전기차 충전 산업** 커뮤니티·�
   "impact": "string",
   "action_items": ["string"],
   "importance": "high|medium|low",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "category": "string",
+  "keywords": [{"name": "string", "confidence": 0.0}]
 }

@@ -5,7 +5,21 @@ stats, chat, search, jobs (+ health).
 """
 from fastapi import APIRouter
 
-from app.api.v1 import auth, chat, health, inquiries, jobs, posts, reports, search, slack, sources, stats, users
+from app.api.v1 import (
+    auth,
+    chat,
+    health,
+    inquiries,
+    jobs,
+    personalization,
+    posts,
+    reports,
+    search,
+    slack,
+    sources,
+    stats,
+    users,
+)
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router, tags=["health"])
@@ -20,3 +34,4 @@ api_router.include_router(stats.router, prefix="/stats", tags=["stats"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(search.router, prefix="/search", tags=["search"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
+api_router.include_router(personalization.router, tags=["personalization"])

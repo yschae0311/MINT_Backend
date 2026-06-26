@@ -10,11 +10,19 @@ from app.models import (  # noqa: F401
     DailyReport,
     DailyReportItem,
     NotificationLog,
+    Keyword,
+    NewsCategory,
     Organization,
+    PersonalReport,
+    PersonalReportItem,
+    PersonalReportView,
     Post,
+    PostKeyword,
+    ReviewQueueItem,
     SlackWebhook,
     Source,
     User,
+    UserKeywordSubscription,
 )
 
 config = context.config

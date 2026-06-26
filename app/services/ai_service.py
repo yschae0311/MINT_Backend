@@ -58,6 +58,10 @@ class AIService:
         )
         post.importance = importance
         self.db.add(output)
+        self.db.flush()
+        from app.services.personalization_service import ClassificationService
+
+        ClassificationService(self.db).classify_post(post, result)
         self.db.commit()
         self.db.refresh(output)
         return AIOutputRead.model_validate(output)

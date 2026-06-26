@@ -36,12 +36,14 @@ from app.services.gov_sources import (
 )
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
+from app.services.post_dedup import compute_content_hash, find_existing_post
 from app.services.reddit_client import (
     RedditClient,
     is_reddit_access_denied,
     reddit_fetch_hint,
     reddit_post_from_raw,
 )
+from app.services.title_translation import localized_title_for_storage
 
 logger = logging.getLogger(__name__)
 
@@ -489,16 +491,18 @@ class CrawlerService:
         except ValueError:
             importance = Importance.medium
 
-        content_hash = hashlib.sha256(f"{url}|{title}".encode()).hexdigest()
-        existing = self.db.scalar(
-            select(Post).where(
-                Post.organization_id == source.organization_id,
-                Post.content_hash == content_hash,
-            )
+        content_hash = compute_content_hash(url, title)
+        stored_title = localized_title_for_storage(title)
+        existing = find_existing_post(
+            self.db,
+            source.organization_id,
+            url,
+            title,
+            include_deleted=revive_deleted,
         )
         if existing:
             if revive_deleted and existing.status == PostStatus.deleted:
-                existing.title = title[:512]
+                existing.title = stored_title[:512]
                 existing.original_url = url
                 existing.published_at = published_at
                 existing.raw_content = ""
@@ -517,7 +521,7 @@ class CrawlerService:
             organization_id=source.organization_id,
             source_id=source.id,
             board_type=BoardType.discovery,
-            title=title[:512],
+            title=stored_title[:512],
             original_url=url,
             published_at=published_at,
             raw_content="",
@@ -558,6 +562,10 @@ class CrawlerService:
         )
         post.importance = importance
         self.db.add(output)
+        self.db.flush()
+        from app.services.personalization_service import ClassificationService
+
+        ClassificationService(self.db).classify_post(post, evaluation)
 
     def _crawl_rss(
         self,
@@ -709,17 +717,19 @@ class CrawlerService:
             if not passes_ai_evaluation(evaluation, title, content, url or ""):
                 return False
 
-        content_hash = hashlib.sha256(f"{url}|{title}".encode()).hexdigest()
-        existing = self.db.scalar(
-            select(Post).where(
-                Post.organization_id == source.organization_id,
-                Post.content_hash == content_hash,
-            )
+        content_hash = compute_content_hash(url, title)
+        stored_title = localized_title_for_storage(title)
+        existing = find_existing_post(
+            self.db,
+            source.organization_id,
+            url,
+            title,
+            include_deleted=revive_deleted,
         )
         if existing:
             # Optionally "revive" deleted posts when rerunning pipeline/manual crawl.
             if revive_deleted and existing.status == PostStatus.deleted:
-                existing.title = title[:512]
+                existing.title = stored_title[:512]
                 existing.original_url = url or None
                 existing.published_at = published_at
                 existing.raw_content = content
@@ -752,7 +762,7 @@ class CrawlerService:
             source_id=source.id,
             # 크롤만으로는 바로 trusted로 올리지 않고, 먼저 AI 판단용 discovery에 등록
             board_type=BoardType.discovery,
-            title=title[:512],
+            title=stored_title[:512],
             original_url=url or None,
             published_at=published_at,
             raw_content=content,
@@ -882,13 +892,7 @@ class CrawlerService:
             manual_source, page_title, url, content, None, stats
         )
         if ok:
-            content_hash = hashlib.sha256(f"{url}|{page_title}".encode()).hexdigest()
-            post = self.db.scalar(
-                select(Post).where(
-                    Post.organization_id == organization_id,
-                    Post.content_hash == content_hash,
-                )
-            )
+            post = find_existing_post(self.db, organization_id, url, page_title)
             if post:
                 post.created_by = CreatedBy.user_submitted
             self.db.commit()

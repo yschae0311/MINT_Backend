@@ -4,18 +4,21 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
 from app.core.database import SessionLocal
-from app.models.enums import JobType, SourceType, TrustLevel
+from app.models.enums import AccountApprovalStatus, JobType, PostStatus, SourceType, TrustLevel
 from app.models.organization import Organization
 from app.models.post import Post
 from app.models.source import Source
+from app.models.user import User
 from app.services.ai_service import AIService
 from app.services.community_sources import COMMUNITY_SOURCE_TYPES
 from app.services.crawl_skip_stats import CrawlSkipStats
 from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService
 from app.services.post_service import PostService
+from app.services.personalization_service import ClassificationService, PersonalReportService
 from app.services.report_service import ReportService
 from app.services.slack_service import SlackService
 from app.workers.celery_app import celery_app
@@ -310,6 +313,97 @@ def summarize_post_task(post_id: str, organization_id: str):
         db.close()
 
 
+@celery_app.task(name="app.workers.tasks.classify_posts_job_task")
+def classify_posts_job_task(job_id: str, organization_id: str, limit: int = 500):
+    db = SessionLocal()
+    try:
+        jobs = JobService(db)
+        jobs.start_job(UUID(job_id))
+        if jobs.is_cancelled(UUID(job_id)):
+            return
+        q = (
+            select(Post)
+            .options(joinedload(Post.ai_outputs))
+            .where(
+                Post.organization_id == UUID(organization_id),
+                Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+            )
+        )
+        posts = list(db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).all())
+        total = len(posts)
+        jobs.update_progress(UUID(job_id), 0, max(total, 1), f"0 / {total} 분류 중…")
+        ok = 0
+        failed = 0
+        for index, post in enumerate(posts, start=1):
+            if jobs.is_cancelled(UUID(job_id)):
+                return
+            try:
+                ClassificationService(db).classify_post(post)
+                db.commit()
+                ok += 1
+            except Exception as exc:
+                logger.warning("classify post=%s failed: %s", post.id, exc)
+                db.rollback()
+                failed += 1
+            jobs.update_progress(UUID(job_id), index, total, f"{index} / {total} 분류 중…")
+        suffix = f", 실패 {failed}건" if failed else ""
+        jobs.complete_job(UUID(job_id), f"재분류 완료 (성공 {ok}건{suffix})")
+    except Exception as exc:
+        logger.exception("classify_posts_job_task failed job=%s", job_id)
+        JobService(db).fail_job(UUID(job_id), str(exc))
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.classify_existing_posts_task")
+def classify_existing_posts_task(organization_id: str | None = None, limit: int = 500):
+    db = SessionLocal()
+    try:
+        q = (
+            select(Post)
+            .options(joinedload(Post.ai_outputs))
+            .where(Post.status.not_in([PostStatus.deleted, PostStatus.hidden]))
+        )
+        if organization_id:
+            q = q.where(Post.organization_id == UUID(organization_id))
+        posts = list(db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).all())
+        for post in posts:
+            try:
+                ClassificationService(db).classify_post(post)
+                db.commit()
+            except Exception as exc:
+                logger.warning("classify post=%s failed: %s", post.id, exc)
+                db.rollback()
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.generate_personal_reports_task")
+def generate_personal_reports_task(report_date: str | None = None):
+    db = SessionLocal()
+    try:
+        target = date.fromisoformat(report_date) if report_date else _kst_today()
+        users = db.scalars(
+            select(User).where(
+                User.is_active.is_(True),
+                User.approval_status == AccountApprovalStatus.approved,
+            )
+        ).all()
+        for user in users:
+            try:
+                PersonalReportService(db).generate_for_user(user, target)
+            except Exception as exc:
+                logger.warning(
+                    "personal report user=%s date=%s failed: %s",
+                    user.id,
+                    target,
+                    exc,
+                )
+                db.rollback()
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.workers.tasks.generate_daily_report_task")
 def generate_daily_report_task(report_date: str | None = None):
     db = SessionLocal()
@@ -403,5 +497,6 @@ def daily_pipeline_task():
     crawl_all_sources_task()
     discovery_pipeline_task()
     generate_daily_report_task()
+    generate_personal_reports_task()
     send_daily_report_to_slack_task()
     logger.info("daily_pipeline finished")

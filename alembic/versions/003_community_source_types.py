@@ -17,6 +17,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute("ALTER TYPE source_type ADD VALUE IF NOT EXISTS 'reddit'")
     op.execute("ALTER TYPE source_type ADD VALUE IF NOT EXISTS 'community_forum'")
     op.execute("ALTER TYPE created_by ADD VALUE IF NOT EXISTS 'user_submitted'")

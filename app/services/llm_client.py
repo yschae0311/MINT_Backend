@@ -7,7 +7,7 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestError
 from app.services.ev_relevance import is_obvious_junk, is_weak_topic_only, passes_keyword_gate
-from app.services.korean_output import KOREAN_RETRY_NOTE, KOREAN_USER_SUFFIX, result_needs_korean_retry
+from app.services.korean_output import KOREAN_RETRY_NOTE, KOREAN_USER_SUFFIX, result_needs_korean_retry, text_needs_korean
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -36,6 +36,14 @@ def _parse_json(text: str) -> dict:
 
 
 class LLMClient(ABC):
+    @abstractmethod
+    def classify_post_content(self, title: str, content: str) -> dict:
+        ...
+
+    @abstractmethod
+    def translate_title(self, title: str) -> str:
+        ...
+
     @abstractmethod
     def summarize_post(self, title: str, content: str) -> dict:
         ...
@@ -113,6 +121,26 @@ class GeminiClient(LLMClient):
         retry_user = f"{payload_user}{KOREAN_RETRY_NOTE}"
         return _parse_json(self._generate(model_name, system, retry_user, json_mode=True))
 
+    def translate_title(self, title: str) -> str:
+        system = _load_prompt("title_translate_v1.md")
+        user = f"제목: {title[:500]}"
+        result = _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
+        translated = (result.get("title") or "").strip()
+        if not translated:
+            raise BadRequestError("Gemini returned empty title translation")
+        return translated[:512]
+
+    def classify_post_content(self, title: str, content: str) -> dict:
+        system = _load_prompt("post_classify_v1.md")
+        user = f"제목: {title}\n\n본문:\n{content[:12000]}"
+        return self._generate_json_korean(
+            self.summary_model,
+            system,
+            user,
+            string_fields=("category",),
+            list_fields=(),
+        )
+
     def summarize_post(self, title: str, content: str) -> dict:
         system = _load_prompt("post_summary_v1.md")
         user = f"제목: {title}\n\n본문:\n{content[:12000]}"
@@ -151,7 +179,7 @@ class GeminiClient(LLMClient):
             self.summary_model,
             system,
             user,
-            string_fields=("relevance_reason", "summary", "impact"),
+            string_fields=("relevance_reason", "summary", "impact", "category"),
             list_fields=("action_items",),
         )
 
@@ -226,6 +254,26 @@ class MockLLMClient(LLMClient):
     def _looks_ev_related(self, title: str, content: str, url: str) -> bool:
         return passes_keyword_gate(title, content, url)
 
+    def translate_title(self, title: str) -> str:
+        text = (title or "").strip()
+        if not text_needs_korean(text):
+            return text
+        return f"{text} (번역)"
+
+    def classify_post_content(self, title: str, content: str) -> dict:
+        blob = f"{title} {content}".lower()
+        category = "커뮤니티/현장" if "커뮤니티" in blob or "reddit" in blob else "충전 인프라"
+        if any(h in blob for h in ("정책", "보조금", "규제", "regulation")):
+            category = "정책/규제"
+        elif any(h in blob for h in ("ocpp", "csms")):
+            category = "CSMS/OCPP"
+        keywords = self._mock_keywords(title, content)
+        return {
+            "category": category,
+            "confidence": 0.78,
+            "keywords": keywords,
+        }
+
     def summarize_post(self, title: str, content: str) -> dict:
         return {
             "summary": f"{title[:120]}에 대한 요약입니다.",
@@ -233,7 +281,26 @@ class MockLLMClient(LLMClient):
             "action_items": ["원문 확인", "관련 정책 모니터링"],
             "importance": "medium",
             "confidence": 0.75,
+            "category": "충전 인프라",
+            "keywords": self._mock_keywords(title, content),
         }
+
+    def _mock_keywords(self, title: str, content: str) -> list[dict]:
+        blob = f"{title} {content}".lower()
+        candidates = (
+            ("OCPP", ("ocpp",)),
+            ("CSMS", ("csms",)),
+            ("충전 인프라", ("충전", "charger", "charging")),
+            ("배터리", ("배터리", "battery")),
+            ("전기차 정책", ("정책", "보조금", "regulation")),
+            ("V2G", ("v2g",)),
+        )
+        matched = [
+            {"name": name, "confidence": 0.82}
+            for name, hints in candidates
+            if any(hint in blob for hint in hints)
+        ]
+        return matched[:5] or [{"name": "충전 인프라", "confidence": 0.65}]
 
     def evaluate_discovery_candidate(
         self, title: str, content: str, url: str, *, community: bool = False
@@ -258,6 +325,8 @@ class MockLLMClient(LLMClient):
             "action_items": ["원문 링크 확인", "관련 정책·표준 모니터링"],
             "importance": "low" if community else "medium",
             "confidence": 0.7,
+            "category": "커뮤니티/현장" if community else "충전 인프라",
+            "keywords": self._mock_keywords(title, content),
         }
 
     def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
@@ -324,6 +393,6 @@ class MockLLMClient(LLMClient):
 
 def get_llm_client() -> LLMClient:
     settings = get_settings()
-    if settings.gemini_api_key:
+    if settings.llm_provider.lower() == "gemini" and settings.gemini_api_key:
         return GeminiClient()
     return MockLLMClient()

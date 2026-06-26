@@ -162,4 +162,7 @@ def seed_defaults(db: Session) -> None:
     _seed_sources(db, org.id, COMMUNITY_SOURCE_SEEDS, low_trust=True)
     _seed_sources(db, org.id, TRUSTED_POLICY_SOURCE_SEEDS, low_trust=False)
 
+    from app.services.personalization_service import TaxonomyService
+
+    TaxonomyService(db).ensure_defaults(org.id)
     db.commit()

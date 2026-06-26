@@ -4,6 +4,16 @@ from app.models.daily_report import DailyReport, DailyReportItem
 from app.models.inquiry import Inquiry, InquiryMessage
 from app.models.notification_log import NotificationLog
 from app.models.organization import Organization
+from app.models.personalization import (
+    Keyword,
+    NewsCategory,
+    PersonalReport,
+    PersonalReportItem,
+    PersonalReportView,
+    PostKeyword,
+    ReviewQueueItem,
+    UserKeywordSubscription,
+)
 from app.models.post import Post
 from app.models.slack_webhook import SlackWebhook
 from app.models.source import Source
@@ -22,4 +32,12 @@ __all__ = [
     "NotificationLog",
     "Inquiry",
     "InquiryMessage",
+    "NewsCategory",
+    "Keyword",
+    "UserKeywordSubscription",
+    "PostKeyword",
+    "PersonalReport",
+    "PersonalReportItem",
+    "PersonalReportView",
+    "ReviewQueueItem",
 ]

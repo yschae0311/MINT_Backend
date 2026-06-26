@@ -36,6 +36,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.generate_daily_report_task",
         "schedule": crontab(hour=8, minute=0),
     },
+    "generate-personal-reports": {
+        "task": "app.workers.tasks.generate_personal_reports_task",
+        "schedule": crontab(hour=8, minute=10),
+    },
     "send-daily-report-slack": {
         "task": "app.workers.tasks.send_daily_report_to_slack_task",
         "schedule": crontab(hour=8, minute=30),
