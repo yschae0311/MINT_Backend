@@ -46,6 +46,8 @@ COMMUNITY_SOURCE_SEEDS = (
 
 
 # 보조금·사업자 선정·고시 등 공식 정책 소스 (중요 파이프라인 / high trust)
+# 기후에너지환경부 RSS: https://www.mcee.go.kr/home/web/index.do?menuId=447
+MCEE_RSS_BASE = "https://www.mcee.go.kr"
 TRUSTED_POLICY_SOURCE_SEEDS = (
     {
         "name": "정책브리핑 정책뉴스",
@@ -62,27 +64,96 @@ TRUSTED_POLICY_SOURCE_SEEDS = (
         "reliability_score": 96,
     },
     {
-        "name": "환경부 전기차·충전 공지",
-        "url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=29",
+        "name": "기후에너지환경부 전기차·충전 공지",
+        "url": f"{MCEE_RSS_BASE}/home/web/board/list.do?boardMasterId=29",
         "source_type": SourceType.notice_page,
         "category": "정책/규제",
         "reliability_score": 98,
     },
     {
-        "name": "환경부 고시·훈령·예규",
-        "url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=67",
-        "source_type": SourceType.notice_page,
+        "name": "기후에너지환경부 공지·공고",
+        "url": f"{MCEE_RSS_BASE}/home/web/board/rss.do?menuId=290&boardMasterId=39",
+        "source_type": SourceType.rss,
+        "category": "정책/규제",
+        "reliability_score": 94,
+    },
+    {
+        "name": "기후에너지환경부 보도·해명자료",
+        "url": f"{MCEE_RSS_BASE}/home/web/board/rss.do?menuId=286&boardMasterId=1",
+        "source_type": SourceType.rss,
+        "category": "정책/규제",
+        "reliability_score": 93,
+    },
+    {
+        "name": "기후에너지환경부 환경정책",
+        "url": f"{MCEE_RSS_BASE}/home/web/policy_data/rss.do?menuId=92",
+        "source_type": SourceType.rss,
+        "category": "정책/규제",
+        "reliability_score": 92,
+    },
+    {
+        "name": "기후에너지환경부 고시·훈령·예규",
+        "url": f"{MCEE_RSS_BASE}/home/web/law/rss.do?menuId=71&condition.typeCode=admrul",
+        "source_type": SourceType.rss,
         "category": "정책/규제",
         "reliability_score": 97,
     },
     {
-        "name": "환경부 입찰·공고",
-        "url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=39",
-        "source_type": SourceType.notice_page,
+        "name": "기후에너지환경부 현행법령",
+        "url": f"{MCEE_RSS_BASE}/home/web/law/rss.do?menuId=70&condition.typeCode=law",
+        "source_type": SourceType.rss,
         "category": "정책/규제",
-        "reliability_score": 94,
+        "reliability_score": 90,
     },
 )
+
+# 구 환경부(me.go.kr) HTML 소스 → 기후에너지환경부(mcee.go.kr) 마이그레이션
+MCEE_SOURCE_MIGRATIONS = (
+    {
+        "old_url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=29",
+        "name": "기후에너지환경부 전기차·충전 공지",
+        "url": f"{MCEE_RSS_BASE}/home/web/board/list.do?boardMasterId=29",
+        "source_type": SourceType.notice_page,
+    },
+    {
+        "old_url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=39",
+        "name": "기후에너지환경부 공지·공고",
+        "url": f"{MCEE_RSS_BASE}/home/web/board/rss.do?menuId=290&boardMasterId=39",
+        "source_type": SourceType.rss,
+    },
+    {
+        "old_url": "https://www.me.go.kr/home/web/board/list.do?boardMasterId=67",
+        "name": "기후에너지환경부 고시·훈령·예규",
+        "url": f"{MCEE_RSS_BASE}/home/web/law/rss.do?menuId=71&condition.typeCode=admrul",
+        "source_type": SourceType.rss,
+    },
+)
+
+
+def _migrate_mcee_sources(db: Session, organization_id) -> None:
+    """me.go.kr HTML 목록 소스를 mcee.go.kr RSS/목록 URL로 갱신."""
+    for migration in MCEE_SOURCE_MIGRATIONS:
+        row = db.scalar(
+            select(Source).where(
+                Source.organization_id == organization_id,
+                Source.url == migration["old_url"],
+            )
+        )
+        if not row:
+            continue
+        conflict = db.scalar(
+            select(Source).where(
+                Source.organization_id == organization_id,
+                Source.url == migration["url"],
+                Source.id != row.id,
+            )
+        )
+        if conflict:
+            row.is_active = False
+            continue
+        row.name = migration["name"]
+        row.url = migration["url"]
+        row.source_type = migration["source_type"]
 
 
 def _deactivate_reddit_sources(db: Session, organization_id) -> None:
@@ -158,6 +229,7 @@ def seed_defaults(db: Session) -> None:
 
     _deactivate_reddit_sources(db, org.id)
     _deactivate_broken_ev_portal_source(db, org.id)
+    _migrate_mcee_sources(db, org.id)
 
     _seed_sources(db, org.id, COMMUNITY_SOURCE_SEEDS, low_trust=True)
     _seed_sources(db, org.id, TRUSTED_POLICY_SOURCE_SEEDS, low_trust=False)

@@ -57,6 +57,16 @@ _DEFAULT_HEADERS = {
 }
 
 
+def _resolve_feed_link(feed_url: str, link: str) -> str:
+    """RSS item link을 절대 URL로 변환 (mcee.go.kr 등 상대 경로 대응)."""
+    link = (link or "").strip()
+    if not link:
+        return ""
+    if link.startswith(("http://", "https://")):
+        return link
+    return urljoin(feed_url, link)
+
+
 class CrawlerService:
     def __init__(self, db: Session):
         self.db = db
@@ -302,7 +312,7 @@ class CrawlerService:
         feed = feedparser.parse(source.url)
         created = skipped = 0
         for entry in feed.entries[: self.discovery_max_candidates]:
-            url = (entry.get("link") or "").strip()
+            url = _resolve_feed_link(source.url, entry.get("link") or "")
             title = (entry.get("title") or "Untitled").strip()
             if not url:
                 skipped += 1
@@ -578,7 +588,7 @@ class CrawlerService:
         feed = feedparser.parse(source.url)
         created = skipped = 0
         for entry in feed.entries[:30]:
-            url = entry.get("link") or ""
+            url = _resolve_feed_link(source.url, entry.get("link") or "")
             title = (entry.get("title") or "Untitled").strip()
             if not url:
                 skipped += 1

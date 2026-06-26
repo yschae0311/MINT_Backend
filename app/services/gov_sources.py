@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 _GOV_HOST_MARKERS = (
+    "mcee.go.kr",
     "me.go.kr",
     "molit.go.kr",
     "korea.kr",
@@ -66,7 +67,7 @@ def extract_gov_article_links(
 def extract_gov_article_text(soup: BeautifulSoup, url: str) -> str | None:
     host = urlparse(str(url)).netloc.lower()
 
-    if "me.go.kr" in host:
+    if "mcee.go.kr" in host or "me.go.kr" in host:
         for selector in (
             ".board_view",
             ".board_view_con",
