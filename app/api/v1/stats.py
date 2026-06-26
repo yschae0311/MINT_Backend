@@ -21,6 +21,7 @@ from app.schemas.stats import (
 )
 from app.services.org_settings_service import OrgSettingsService
 from app.services.post_service import PostService
+from app.services.personalization_service import ReviewQueueService
 
 router = APIRouter()
 
@@ -129,6 +130,7 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
     )
 
     pending_discovery = PostService(db).pending_count(org_id)
+    review_queue_pending = ReviewQueueService(db).pending_count(org_id)
 
     active_sources = (
         db.scalar(
@@ -178,6 +180,7 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
         new_today=new_today,
         trusted_count=trusted_count,
         pending_discovery=pending_discovery,
+        review_queue_pending=review_queue_pending,
         high_importance=high_importance,
         active_sources=active_sources,
         total_sources=total_sources,

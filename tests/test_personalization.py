@@ -12,10 +12,13 @@ from app.models.enums import (
     BoardType,
     CreatedBy,
     PostStatus,
+    ReviewQueueReason,
+    ReviewQueueStatus,
     TrustLevel,
     UserRole,
 )
 from app.models.organization import Organization
+from app.models.personalization import ReviewQueueItem
 from app.models.post import Post
 from app.models.user import User
 from app.services.llm_client import MockLLMClient
@@ -23,6 +26,7 @@ from app.services.personalization_service import (
     ClassificationService,
     PersonalReportService,
     PersonalizedNewsService,
+    ReviewQueueService,
     TaxonomyService,
 )
 
@@ -167,6 +171,47 @@ class PersonalizationServiceTest(unittest.TestCase):
         )
         self.assertIn(custom.name, {item.name for item in owner_news.items[0].matched_keywords})
         self.assertNotIn(custom.name, {item.name for item in other_news.items[0].matched_keywords})
+
+    def test_review_queue_pending_count_excludes_hidden_posts(self) -> None:
+        visible = self._post()
+        hidden = self._post(1)
+        hidden.status = PostStatus.hidden
+        self.db.add(
+            ReviewQueueItem(
+                organization_id=self.user.organization_id,
+                post_id=visible.id,
+                reason=ReviewQueueReason.no_keywords,
+                status=ReviewQueueStatus.pending,
+            )
+        )
+        self.db.add(
+            ReviewQueueItem(
+                organization_id=self.user.organization_id,
+                post_id=hidden.id,
+                reason=ReviewQueueReason.no_keywords,
+                status=ReviewQueueStatus.pending,
+            )
+        )
+        self.db.commit()
+        service = ReviewQueueService(self.db)
+        self.assertEqual(service.pending_count(self.user.organization_id), 1)
+        self.assertEqual(len(service.list(self.user.organization_id, ReviewQueueStatus.pending)), 1)
+
+    def test_classified_post_appears_in_news_feed(self) -> None:
+        post = self._post()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "CSMS/OCPP",
+                "confidence": 0.92,
+                "keywords": [{"name": "OCPP", "confidence": 0.95}],
+            },
+        )
+        self.db.commit()
+        news = PersonalizedNewsService(self.db).list_news(self.user, personalized=False, size=20)
+        self.assertEqual(news.total, 1)
+        self.assertEqual(news.items[0].id, post.id)
+        self.assertTrue(news.items[0].matched_keywords)
 
     def _post(self, index: int = 0) -> Post:
         post = Post(

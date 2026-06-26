@@ -849,6 +849,21 @@ class ReviewQueueService:
     def __init__(self, db: Session):
         self.db = db
 
+    def pending_count(self, organization_id: UUID) -> int:
+        return (
+            self.db.scalar(
+                select(func.count())
+                .select_from(ReviewQueueItem)
+                .join(Post, Post.id == ReviewQueueItem.post_id)
+                .where(
+                    ReviewQueueItem.organization_id == organization_id,
+                    ReviewQueueItem.status == ReviewQueueStatus.pending,
+                    Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+                )
+            )
+            or 0
+        )
+
     def list(self, organization_id: UUID, status: ReviewQueueStatus) -> list[ReviewQueueRead]:
         rows = self.db.execute(
             select(ReviewQueueItem, Post)
@@ -856,6 +871,7 @@ class ReviewQueueService:
             .where(
                 ReviewQueueItem.organization_id == organization_id,
                 ReviewQueueItem.status == status,
+                Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
             )
             .order_by(ReviewQueueItem.created_at.desc())
         ).all()
@@ -896,6 +912,21 @@ class ReviewQueueService:
             post = self.db.get(Post, row.post_id)
             if post:
                 post.status = PostStatus.hidden
+        elif status == ReviewQueueStatus.resolved:
+            self._promote_keywords_for_post(row.post_id)
         self.db.commit()
         self.db.refresh(row)
         return row
+
+    def _promote_keywords_for_post(self, post_id: UUID) -> None:
+        """검수 완료 시 해당 기사에 연결된 후보 키워드를 활성화해 뉴스 탐색에 반영."""
+        keywords = self.db.scalars(
+            select(Keyword)
+            .join(PostKeyword, PostKeyword.keyword_id == Keyword.id)
+            .where(
+                PostKeyword.post_id == post_id,
+                Keyword.status == KeywordStatus.candidate,
+            )
+        ).all()
+        for keyword in keywords:
+            keyword.status = KeywordStatus.active

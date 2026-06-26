@@ -38,6 +38,7 @@ class DashboardStatsResponse(BaseModel):
     new_today: int
     trusted_count: int
     pending_discovery: int
+    review_queue_pending: int
     high_importance: int
     active_sources: int
     total_sources: int
