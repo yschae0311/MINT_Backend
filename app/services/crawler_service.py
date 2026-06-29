@@ -38,7 +38,7 @@ from app.services.gov_sources import (
 )
 from app.services.llm_client import get_llm_client
 from app.services.post_dedup import compute_content_hash, find_existing_post
-from app.search.post_content import BODY_MAX_CHARS, clear_pg_text_fields, pg_ai_summary_placeholder, save_post_content
+from app.search.post_content import BODY_MAX_CHARS, PostContent, clear_pg_text_fields, pg_ai_summary_placeholder, save_post_content
 from app.services.reddit_client import (
     RedditClient,
     is_reddit_access_denied,
@@ -622,22 +622,38 @@ class CrawlerService:
         post.importance = importance
         self.db.add(output)
         self.db.flush()
+
+        content = PostContent(
+            original_url=original_url,
+            summary=evaluation.get("summary", ""),
+            impact=evaluation.get("impact") or None,
+            body=body,
+            action_items=evaluation.get("action_items"),
+        )
+
+        from app.services.personalization_service import ClassificationService
+
+        _, review_reasons = ClassificationService(self.db).classify_post(
+            post,
+            evaluation,
+            content=content,
+            skip_es_sync=use_es,
+        )
+
         if use_es:
             save_post_content(
                 self.db,
                 post,
-                original_url=original_url,
-                summary=evaluation.get("summary", ""),
-                impact=evaluation.get("impact") or None,
-                body=body,
-                action_items=evaluation.get("action_items") or None,
-                merge_existing=True,
+                original_url=content.original_url,
+                summary=content.summary,
+                impact=content.impact,
+                body=content.body,
+                action_items=content.action_items,
+                merge_existing=False,
             )
         elif original_url:
             post.original_url = original_url
-        from app.services.personalization_service import ClassificationService
 
-        _, review_reasons = ClassificationService(self.db).classify_post(post, evaluation)
         return _needs_keywording_review(review_reasons)
 
     def _crawl_rss(

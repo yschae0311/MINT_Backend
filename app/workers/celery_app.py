@@ -2,8 +2,10 @@ from celery import Celery
 from celery.schedules import crontab
 
 from app.core.config import get_settings
+from app.core.logging import setup_logging
 
 settings = get_settings()
+setup_logging(settings.debug)
 
 celery_app = Celery("mint", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(

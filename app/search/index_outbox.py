@@ -29,6 +29,44 @@ def content_to_payload(content: PostContent) -> dict[str, Any]:
     }
 
 
+def _pending_row(
+    db: Session,
+    post_id: UUID,
+    action: SearchIndexAction,
+) -> SearchIndexQueue | None:
+    return db.scalar(
+        select(SearchIndexQueue)
+        .where(
+            SearchIndexQueue.post_id == post_id,
+            SearchIndexQueue.action == action,
+            SearchIndexQueue.processed_at.is_(None),
+        )
+        .order_by(SearchIndexQueue.created_at.desc())
+        .limit(1)
+    )
+
+
+def mark_search_index_synced(db: Session, post_id: UUID, *, action: SearchIndexAction = SearchIndexAction.index) -> int:
+    """Mark pending outbox rows processed after a successful inline ES write."""
+    rows = list(
+        db.scalars(
+            select(SearchIndexQueue).where(
+                SearchIndexQueue.post_id == post_id,
+                SearchIndexQueue.action == action,
+                SearchIndexQueue.processed_at.is_(None),
+            )
+        ).all()
+    )
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        row.processed_at = now
+        row.last_error = None
+    db.flush()
+    return len(rows)
+
+
 def enqueue_search_index(
     db: Session,
     post_id: UUID,
@@ -39,6 +77,14 @@ def enqueue_search_index(
     if not get_settings().search_uses_elasticsearch:
         return
 
+    existing = _pending_row(db, post_id, action)
+    if existing:
+        if payload is not None:
+            existing.payload = payload
+        existing.last_error = None
+        db.flush()
+        return
+
     db.add(
         SearchIndexQueue(
             post_id=post_id,
@@ -47,13 +93,6 @@ def enqueue_search_index(
         )
     )
     db.flush()
-
-    try:
-        from app.workers.tasks import process_search_index_queue_task
-
-        process_search_index_queue_task.delay()
-    except Exception as exc:
-        logger.debug("Could not dispatch search index queue task: %s", exc)
 
 
 def _apply_index(db: Session, post_id: UUID, payload: dict[str, Any] | None) -> bool:
@@ -98,7 +137,7 @@ def process_search_index_queue(db: Session, *, batch_size: int = 50) -> tuple[in
     for row in rows:
         try:
             if row.action == SearchIndexAction.delete:
-                success = delete_post_content(row.post_id)
+                success = delete_post_content(row.post_id, db=db)
             else:
                 success = _apply_index(db, row.post_id, row.payload)
 

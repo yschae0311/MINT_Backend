@@ -295,6 +295,9 @@ def save_post_content(
             document=doc,
         )
         clear_pg_text_fields(post)
+        from app.search.index_outbox import mark_search_index_synced
+
+        mark_search_index_synced(db, post.id)
         return True
     except Exception as exc:
         logger.warning("Failed to save post content to ES %s: %s", post.id, exc)

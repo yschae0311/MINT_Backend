@@ -2,7 +2,7 @@ import hashlib
 import unittest
 from unittest.mock import patch
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
@@ -45,6 +45,29 @@ class SearchIndexOutboxTest(unittest.TestCase):
         self.engine.dispose()
 
     @patch("app.core.config.get_settings")
+    def test_enqueue_coalesces_duplicate_rows(self, mock_settings) -> None:
+        settings = mock_settings.return_value
+        settings.search_uses_elasticsearch = True
+
+        enqueue_search_index(
+            self.db,
+            self.post.id,
+            SearchIndexAction.index,
+            payload={"summary": "v1", "body": "본문"},
+        )
+        enqueue_search_index(
+            self.db,
+            self.post.id,
+            SearchIndexAction.index,
+            payload={"summary": "v2", "body": "본문"},
+        )
+        self.db.commit()
+        self.assertEqual(pending_search_index_count(self.db), 1)
+
+        row = self.db.scalar(select(SearchIndexQueue).where(SearchIndexQueue.post_id == self.post.id))
+        self.assertEqual(row.payload["summary"], "v2")
+
+    @patch("app.core.config.get_settings")
     def test_enqueue_and_process_index(self, mock_settings) -> None:
         settings = mock_settings.return_value
         settings.search_uses_elasticsearch = True
@@ -59,8 +82,7 @@ class SearchIndexOutboxTest(unittest.TestCase):
             self.db.commit()
             self.assertEqual(pending_search_index_count(self.db), 1)
 
-            with patch("app.workers.tasks.process_search_index_queue_task.delay"):
-                ok, failed = process_search_index_queue(self.db)
+            ok, failed = process_search_index_queue(self.db)
             self.assertEqual((ok, failed), (1, 0))
             self.assertEqual(pending_search_index_count(self.db), 0)
             save_mock.assert_called_once()

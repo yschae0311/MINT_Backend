@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 
 from app.core.config import get_settings
 from app.search.es_client import get_es_client
@@ -92,6 +93,11 @@ def resolve_use_nori(client) -> bool:
 
 def ensure_posts_index() -> bool:
     """Create posts index if missing. Returns True when index is ready."""
+    return _ensure_posts_index_cached()
+
+
+@lru_cache
+def _ensure_posts_index_cached() -> bool:
     settings = get_settings()
     client = get_es_client()
     if client is None:

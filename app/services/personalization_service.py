@@ -42,7 +42,7 @@ from app.schemas.personalization import (
     PersonalReportRead,
     ReviewQueueRead,
 )
-from app.search.post_content import get_post_content, mget_post_contents, legacy_pg_content_enabled, sync_post_metadata
+from app.search.post_content import PostContent, get_post_content, mget_post_contents, legacy_pg_content_enabled, sync_post_metadata
 from app.search.post_search_query import PostSearchFilters, load_posts_ordered, search_posts
 from app.services.llm_client import get_llm_client
 
@@ -363,7 +363,14 @@ class ClassificationService:
     def __init__(self, db: Session):
         self.db = db
 
-    def classify_post(self, post: Post, result: dict | None = None) -> tuple[list[str], list[ReviewQueueReason]]:
+    def classify_post(
+        self,
+        post: Post,
+        result: dict | None = None,
+        *,
+        content: PostContent | None = None,
+        skip_es_sync: bool = False,
+    ) -> tuple[list[str], list[ReviewQueueReason]]:
         taxonomy = TaxonomyService(self.db)
         taxonomy.ensure_defaults(post.organization_id)
         merged = dict(result or {})
@@ -371,7 +378,7 @@ class ClassificationService:
         keywords_from_ai = bool(merged.get("keywords"))
 
         if not merged.get("keywords") or not merged.get("category"):
-            extracted = self._extract_classification(post, review_reasons)
+            extracted = self._extract_classification(post, review_reasons, content=content)
             if extracted.get("keywords"):
                 keywords_from_ai = True
             for key, value in extracted.items():
@@ -407,7 +414,7 @@ class ClassificationService:
         organization_keywords = [
             keyword for keyword in all_keywords if keyword.scope == KeywordScope.organization
         ]
-        blob = self._post_text_blob(post)
+        blob = self._post_text_blob(post, content=content)
         for keyword in all_keywords:
             terms = [keyword.name, *(keyword.aliases or [])]
             if any(normalize_keyword(term) in blob for term in terms if normalize_keyword(term)):
@@ -462,16 +469,25 @@ class ClassificationService:
         self._sync_review_queue(post, list(dict.fromkeys(review_reasons)))
         post.keywords = {"items": linked_names, "classification_version": "v2"}
         self.db.flush()
-        sync_post_metadata(self.db, post)
+        if not skip_es_sync:
+            sync_post_metadata(self.db, post)
         return linked_names, list(dict.fromkeys(review_reasons))
 
-    def _post_text_blob(self, post: Post) -> str:
-        content = get_post_content(self.db, post.id)
+    def _post_text_blob(self, post: Post, *, content: PostContent | None = None) -> str:
+        if content is None:
+            content = get_post_content(self.db, post.id)
         parts = [post.title or "", content.body or "", content.summary or ""]
         return normalize_keyword(" ".join(part for part in parts if part))
 
-    def _extract_classification(self, post: Post, review_reasons: list[ReviewQueueReason]) -> dict:
-        content = get_post_content(self.db, post.id)
+    def _extract_classification(
+        self,
+        post: Post,
+        review_reasons: list[ReviewQueueReason],
+        *,
+        content: PostContent | None = None,
+    ) -> dict:
+        if content is None:
+            content = get_post_content(self.db, post.id)
         content_blob = "\n\n".join(
             part
             for part in [content.body or "", content.summary or ""]
