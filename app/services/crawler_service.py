@@ -37,7 +37,7 @@ from app.services.gov_sources import (
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 from app.services.post_dedup import compute_content_hash, find_existing_post
-from app.search.post_content import clear_pg_text_fields, pg_ai_summary_placeholder, save_post_content
+from app.search.post_content import BODY_MAX_CHARS, clear_pg_text_fields, pg_ai_summary_placeholder, save_post_content
 from app.services.reddit_client import (
     RedditClient,
     is_reddit_access_denied,
@@ -379,7 +379,7 @@ class CrawlerService:
             soup = BeautifulSoup(resp.text, "html.parser")
         title = soup.title.string.strip() if soup.title and soup.title.string else source.name
         content = self._extract_main_text(soup, source.source_type)
-        content = re.sub(r"\s+", " ", content).strip()[:8000]
+        content = re.sub(r"\s+", " ", content).strip()[:BODY_MAX_CHARS]
         ok, reason = self._process_discovery_candidate(source, title, source.url, content, None, stats)
         if ok:
             return 1, 0
@@ -396,7 +396,7 @@ class CrawlerService:
             text = extract_gov_article_text(soup, url)
         if not text:
             text = self._extract_main_text(soup, source_type)
-        return re.sub(r"\s+", " ", text).strip()[:8000]
+        return re.sub(r"\s+", " ", text).strip()[:BODY_MAX_CHARS]
 
     def _extract_article_links(self, soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:
         if is_gov_notice_host(base_url):
@@ -484,7 +484,9 @@ class CrawlerService:
             )
             return False, reject
 
-        return self._save_discovery_post(source, title, url, evaluation, published_at)
+        return self._save_discovery_post(
+            source, title, url, evaluation, published_at, body=content
+        )
 
     def _save_discovery_post(
         self,
@@ -494,6 +496,7 @@ class CrawlerService:
         evaluation: dict,
         published_at: datetime | None,
         *,
+        body: str = "",
         revive_deleted: bool = True,
     ) -> tuple[bool, str | None]:
         imp_raw = evaluation.get("importance", "medium")
@@ -511,6 +514,7 @@ class CrawlerService:
             title,
             include_deleted=revive_deleted,
         )
+        stored_body = (body or "").strip()
         if existing:
             if revive_deleted and existing.status == PostStatus.deleted:
                 existing.title = stored_title[:512]
@@ -526,6 +530,7 @@ class CrawlerService:
                     evaluation,
                     community=self._is_community_source(source),
                     original_url=url or None,
+                    body=stored_body,
                 )
                 return True, None
             return False, "duplicate"
@@ -553,6 +558,7 @@ class CrawlerService:
             evaluation,
             community=self._is_community_source(source),
             original_url=url or None,
+            body=stored_body,
         )
         return True, None
 
@@ -678,7 +684,7 @@ class CrawlerService:
             tag.decompose()
 
         content = self._extract_main_text(soup, source.source_type)
-        content = re.sub(r"\s+", " ", content).strip()[:8000]
+        content = re.sub(r"\s+", " ", content).strip()[:BODY_MAX_CHARS]
         created = (
             1
             if self._save_post(

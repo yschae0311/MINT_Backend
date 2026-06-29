@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # PG ai_outputs.summary is NOT NULL — text lives in Elasticsearch.
 _PG_AI_SUMMARY_PLACEHOLDER = " "
+BODY_MAX_CHARS = 50_000
 
 
 @dataclass
@@ -61,7 +62,7 @@ def _content_from_legacy_post(post: Post) -> PostContent:
         original_url=post.original_url,
         summary=summary,
         impact=latest_ai.impact if latest_ai else None,
-        body=(post.raw_content or "")[:8000],
+        body=(post.raw_content or "")[:BODY_MAX_CHARS],
         action_items=latest_ai.action_items if latest_ai else None,
     )
 
@@ -92,7 +93,7 @@ def _document_from_source(source: dict[str, Any]) -> PostContent:
         original_url=source.get("original_url") or None,
         summary=source.get("summary") or None,
         impact=source.get("impact") or None,
-        body=(source.get("body") or "")[:8000],
+        body=(source.get("body") or "")[:BODY_MAX_CHARS],
         action_items=source.get("action_items"),
     )
 
@@ -219,7 +220,7 @@ def _build_index_document(
         "title": post.title or "",
         "summary": content.summary or "",
         "impact": content.impact or "",
-        "body": (content.body or "")[:8000],
+        "body": (content.body or "")[:BODY_MAX_CHARS],
         "action_items": content.action_items,
         "keyword_names": [keyword.name for _, keyword in keyword_rows],
         "keyword_ids": [str(keyword.id) for _, keyword in keyword_rows],
