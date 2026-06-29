@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,6 +50,28 @@ def find_ca_in_directory(directory: Path) -> Path | None:
     return None
 
 
+def build_es_ssl_context(*, verify_certs: bool, ca_path: Path | None = None) -> ssl.SSLContext:
+    """Build TLS context for Elasticsearch.
+
+    Python 3.13+ enables VERIFY_X509_STRICT by default, which rejects CA certs
+    without Key Usage (common for elasticsearch-certutil / older managed ES).
+    """
+    if verify_certs:
+        if ca_path is not None:
+            ctx = ssl.create_default_context(cafile=str(ca_path))
+        else:
+            ctx = ssl.create_default_context()
+        strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
+        if strict:
+            ctx.verify_flags &= ~strict
+        return ctx
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def _es_connection_kwargs() -> dict | None:
     """ES_ADDR + CA_CRT + basic_auth — 동료 환경과 동일한 연결 옵션."""
     settings = get_settings()
@@ -59,7 +82,6 @@ def _es_connection_kwargs() -> dict | None:
     kwargs: dict = {
         "hosts": [url],
         "request_timeout": settings.elasticsearch_request_timeout_sec,
-        "verify_certs": settings.elasticsearch_verify_certs,
     }
 
     if settings.elasticsearch_username:
@@ -69,9 +91,15 @@ def _es_connection_kwargs() -> dict | None:
         )
 
     ca_path = resolve_ca_certs_path(settings.elasticsearch_ca_certs)
-    if ca_path:
-        kwargs["ca_certs"] = str(ca_path)
-    elif settings.elasticsearch_verify_certs and url.lower().startswith("https://"):
+    kwargs["ssl_context"] = build_es_ssl_context(
+        verify_certs=settings.elasticsearch_verify_certs,
+        ca_path=ca_path,
+    )
+    if (
+        settings.elasticsearch_verify_certs
+        and ca_path is None
+        and url.lower().startswith("https://")
+    ):
         logger.warning(
             "Elasticsearch HTTPS without ELASTICSEARCH_CA_CERTS — TLS verify may fail"
         )
@@ -142,7 +170,10 @@ async def ping_elasticsearch() -> tuple[str, str | None]:
                 f"{name}: ES host unreachable (private IP 172.31.x requires VPN/SSH tunnel or run from same VPC)",
             )
         if "SSLError" in name or "certificate" in str(exc).lower():
-            return "error", f"{name}: {exc} — check ELASTICSEARCH_CA_CERTS"
+            hint = "check ELASTICSEARCH_CA_CERTS"
+            if "key usage extension" in str(exc).lower():
+                hint += " (Python 3.13+ strict CA check — deploy latest backend es_client fix)"
+            return "error", f"{name}: {exc} — {hint}"
         if "AuthenticationException" in name or "401" in str(exc):
             return "error", "authentication failed — check ELASTICSEARCH_USERNAME/PASSWORD"
         return "error", f"{name}: {exc}"
