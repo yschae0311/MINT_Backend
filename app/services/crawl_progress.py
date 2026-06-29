@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
-from app.models.enums import SourceType
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.enums import SourceType, TrustLevel
 from app.models.source import Source
 from app.services.community_sources import COMMUNITY_SOURCE_TYPES
 from app.services.job_service import JobService
@@ -15,6 +18,42 @@ from app.services.job_service import JobService
 _FLUSH_INTERVAL_SEC = 0.4
 
 CandidateOutcome = Literal["skipped", "passed", "review"]
+
+
+def discovery_sources_query(
+    organization_id: UUID,
+    *,
+    to_discovery: bool,
+    trusted_only: bool,
+    community_only: bool = False,
+    exclude_community: bool = False,
+):
+    q = select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
+    if community_only:
+        q = q.where(Source.source_type.in_(tuple(COMMUNITY_SOURCE_TYPES)))
+    elif to_discovery and trusted_only:
+        q = q.where(Source.trust_level == TrustLevel.high)
+    if exclude_community and not community_only:
+        q = q.where(Source.source_type.not_in(tuple(COMMUNITY_SOURCE_TYPES)))
+        q = q.where(Source.trust_level != TrustLevel.low)
+    return q
+
+
+def estimate_discovery_pipeline_total(
+    db: Session,
+    organization_id: UUID,
+    *,
+    trusted_only: bool,
+    community_only: bool,
+) -> int:
+    q = discovery_sources_query(
+        organization_id,
+        to_discovery=True,
+        trusted_only=trusted_only,
+        community_only=community_only,
+    )
+    sources = list(db.scalars(q).all())
+    return sum(estimate_discovery_candidates_per_source(s) for s in sources) or 1
 
 
 def estimate_discovery_candidates_per_source(source: Source) -> int:

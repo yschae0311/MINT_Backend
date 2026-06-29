@@ -21,6 +21,7 @@ from app.schemas.source import (
     SourceUpdate,
 )
 from app.services.crawler_service import CrawlerService
+from app.services.crawl_progress import estimate_discovery_candidates_per_source, estimate_discovery_pipeline_total
 from app.services.job_service import JobService, dispatch_task
 from app.services.org_settings_service import OrgSettingsService
 from app.services.source_service import SourceService
@@ -92,13 +93,25 @@ def crawl_all_to_discovery(
     jobs = JobService(db)
     jobs.require_idle(user.organization_id)
     label = "커뮤니티 탐문 파이프라인" if community_only else "전체 AI 발견 파이프라인"
+    estimated = estimate_discovery_pipeline_total(
+        db,
+        user.organization_id,
+        trusted_only=trusted_only,
+        community_only=community_only,
+    )
     job = jobs.create_job(
         user.organization_id,
         JobType.community_discovery_pipeline if community_only else JobType.crawl_all_discovery,
         label,
         triggered_by=user.id,
+        progress_total=estimated,
     )
-    jobs.update_progress(job.id, 0, 1, "워커 시작 대기 중…")
+    jobs.update_progress(
+        job.id,
+        0,
+        estimated,
+        f"0 / {estimated}건 · 워커 시작 대기 중…",
+    )
     db.commit()
     dispatch_task(
         crawl_all_discovery_job_task,
@@ -184,12 +197,19 @@ def crawl_source_to_discovery(
         raise NotFoundError("Source not found")
     jobs = JobService(db)
     jobs.require_idle(user.organization_id)
+    estimated = estimate_discovery_candidates_per_source(source)
     job = jobs.create_job(
         user.organization_id,
         JobType.crawl_source_discovery,
         f"AI 발견 크롤링 · {source.name}",
         triggered_by=user.id,
-        progress_total=1,
+        progress_total=estimated,
+    )
+    jobs.update_progress(
+        job.id,
+        0,
+        estimated,
+        f"0 / {estimated}건 · 워커 시작 대기 중…",
     )
     db.commit()
     dispatch_task(

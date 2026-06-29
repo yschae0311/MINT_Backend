@@ -1,6 +1,7 @@
 from celery import Celery
 from celery.schedules import crontab
 
+from app.core.celery_queues import BACKGROUND_QUEUE, DEFAULT_QUEUE, INTERACTIVE_QUEUE
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 
@@ -14,6 +15,16 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="Asia/Seoul",
     enable_utc=True,
+    worker_prefetch_multiplier=1,
+    task_routes={
+        "app.workers.tasks.crawl_all_discovery_job_task": {"queue": INTERACTIVE_QUEUE},
+        "app.workers.tasks.crawl_source_job_task": {"queue": INTERACTIVE_QUEUE},
+        "app.workers.tasks.generate_report_job_task": {"queue": INTERACTIVE_QUEUE},
+        "app.workers.tasks.classify_posts_job_task": {"queue": INTERACTIVE_QUEUE},
+        "app.workers.tasks.generate_personal_reports_job_task": {"queue": INTERACTIVE_QUEUE},
+        "app.workers.tasks.process_search_index_queue_task": {"queue": BACKGROUND_QUEUE},
+    },
+    task_default_queue=DEFAULT_QUEUE,
 )
 celery_app.autodiscover_tasks(["app.workers"])
 

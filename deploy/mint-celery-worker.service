@@ -9,7 +9,7 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/MINT_Backend
 
-ExecStart=/home/ubuntu/MINT_Backend/.venv/bin/celery -A app.workers.celery_app worker -l info
+ExecStart=/home/ubuntu/MINT_Backend/.venv/bin/celery -A app.workers.celery_app worker -l info -Q interactive,celery,background
 
 Restart=on-failure
 RestartSec=10

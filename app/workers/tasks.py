@@ -7,14 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from app.core.database import SessionLocal
-from app.models.enums import AccountApprovalStatus, JobType, PostStatus, SourceType, TrustLevel
+from app.models.enums import AccountApprovalStatus, JobType, PostStatus, SourceType
 from app.models.organization import Organization
 from app.models.post import Post
 from app.models.source import Source
 from app.models.user import User
 from app.services.ai_service import AIService
-from app.services.community_sources import COMMUNITY_SOURCE_TYPES
-from app.services.crawl_progress import CrawlProgressTracker, estimate_discovery_candidates_per_source
+from app.services.crawl_progress import (
+    CrawlProgressTracker,
+    discovery_sources_query,
+    estimate_discovery_candidates_per_source,
+)
 from app.services.crawl_skip_stats import CrawlSkipStats
 from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService
@@ -40,15 +43,13 @@ def _discovery_sources_query(
     community_only: bool = False,
     exclude_community: bool = False,
 ):
-    q = select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
-    if community_only:
-        q = q.where(Source.source_type.in_(tuple(COMMUNITY_SOURCE_TYPES)))
-    elif to_discovery and trusted_only:
-        q = q.where(Source.trust_level == TrustLevel.high)
-    if exclude_community and not community_only:
-        q = q.where(Source.source_type.not_in(tuple(COMMUNITY_SOURCE_TYPES)))
-        q = q.where(Source.trust_level != TrustLevel.low)
-    return q
+    return discovery_sources_query(
+        organization_id,
+        to_discovery=to_discovery,
+        trusted_only=trusted_only,
+        community_only=community_only,
+        exclude_community=exclude_community,
+    )
 
 
 def _run_crawl_all(
@@ -119,19 +120,48 @@ def _run_crawl_all(
 
 
 @celery_app.task(name="app.workers.tasks.process_search_index_queue_task")
-def process_search_index_queue_task(batch_size: int = 50):
+def process_search_index_queue_task(batch_size: int = 20):
+    from sqlalchemy import func
+
+    from app.core.redis_lock import redis_lock
+    from app.models.background_job import BackgroundJob
+    from app.models.enums import JobStatus
     from app.search.index_outbox import process_search_index_queue
 
-    db = SessionLocal()
-    try:
-        ok, failed = process_search_index_queue(db, batch_size=batch_size)
-        if ok or failed:
-            logger.info("search index queue processed ok=%s failed=%s", ok, failed)
-    except Exception as exc:
-        logger.exception("process_search_index_queue_task failed: %s", exc)
-        db.rollback()
-    finally:
-        db.close()
+    with redis_lock("mint:search_index_queue", ttl_seconds=180) as acquired:
+        if not acquired:
+            return
+
+        db = SessionLocal()
+        try:
+            active_crawl = db.scalar(
+                select(func.count())
+                .select_from(BackgroundJob)
+                .where(
+                    BackgroundJob.status == JobStatus.running,
+                    BackgroundJob.job_type.in_(
+                        (
+                            JobType.crawl_all_discovery,
+                            JobType.crawl_source_discovery,
+                            JobType.discovery_pipeline,
+                            JobType.community_discovery_pipeline,
+                            JobType.crawl_source,
+                            JobType.crawl_all,
+                        )
+                    ),
+                )
+            )
+            if active_crawl:
+                return
+
+            ok, failed = process_search_index_queue(db, batch_size=batch_size)
+            if ok or failed:
+                logger.info("search index queue processed ok=%s failed=%s", ok, failed)
+        except Exception as exc:
+            logger.exception("process_search_index_queue_task failed: %s", exc)
+            db.rollback()
+        finally:
+            db.close()
 
 
 @celery_app.task(name="app.workers.tasks.crawl_source_job_task")

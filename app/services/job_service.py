@@ -60,6 +60,11 @@ class JobService:
             return
         job.status = JobStatus.running
         job.started_at = datetime.now(timezone.utc)
+        if not job.progress_message or "워커 시작 대기" in job.progress_message:
+            if job.progress_total > 0:
+                job.progress_message = f"0 / {job.progress_total}건 · 시작"
+            else:
+                job.progress_message = "실행 준비 중…"
         self.db.commit()
 
     def is_cancelled(self, job_id: UUID) -> bool:
@@ -198,10 +203,17 @@ class JobService:
         return job
 
 
-def dispatch_task(task, job_id: str, *args, db: Session) -> None:
+def dispatch_task(
+    task,
+    job_id: str,
+    *args,
+    db: Session,
+    queue: str = "interactive",
+    priority: int = 9,
+) -> None:
     """Enqueue Celery task; fall back to inline execution if broker is unavailable."""
     try:
-        async_result = task.delay(job_id, *args)
+        async_result = task.apply_async(args=(job_id, *args), queue=queue, priority=priority)
         JobService(db).set_celery_task_id(UUID(job_id), async_result.id)
     except Exception as exc:
         logger.warning("Celery dispatch failed, running inline job=%s: %s", job_id, exc)
