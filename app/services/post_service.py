@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.models.ai_output import AIOutput
 from app.models.enums import BoardType, CreatedBy, PostStatus
@@ -13,6 +14,15 @@ from app.models.source import Source
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.schemas.post import AIOutputRead, PostCreate, PostDetail, PostRead, PostUpdate
+from app.search.post_content import (
+    get_post_content,
+    mget_post_contents,
+    pg_ai_summary_placeholder,
+    save_post_content,
+    sync_post_metadata,
+)
+from app.search.post_indexer import delete_post_index
+from app.search.post_search import search_post_ids
 
 
 class PostService:
@@ -48,10 +58,17 @@ class PostService:
         if source_id:
             q = q.where(Post.source_id == source_id)
         if keyword:
-            like = f"%{keyword}%"
-            q = q.outerjoin(AIOutput).where(
-                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
-            )
+            if get_settings().search_uses_elasticsearch:
+                matched_ids = search_post_ids(organization_id, keyword, limit=500)
+                if matched_ids:
+                    q = q.where(Post.id.in_(matched_ids))
+                else:
+                    return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
+            else:
+                like = f"%{keyword}%"
+                q = q.outerjoin(AIOutput).where(
+                    or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
+                )
 
         count_q = select(func.count(func.distinct(Post.id))).select_from(Post)
         count_q = count_q.where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
@@ -66,26 +83,36 @@ class PostService:
         if source_id:
             count_q = count_q.where(Post.source_id == source_id)
         if keyword:
-            like = f"%{keyword}%"
-            count_q = count_q.outerjoin(AIOutput).where(
-                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
-            )
+            if get_settings().search_uses_elasticsearch:
+                matched_ids = search_post_ids(organization_id, keyword, limit=500)
+                if matched_ids:
+                    count_q = count_q.where(Post.id.in_(matched_ids))
+                else:
+                    return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
+            else:
+                like = f"%{keyword}%"
+                count_q = count_q.outerjoin(AIOutput).where(
+                    or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
+                )
         total = self.db.scalar(count_q) or 0
         posts = self.db.scalars(
             q.order_by(Post.collected_at.desc()).offset((page - 1) * size).limit(size)
         ).unique().all()
 
-        items = [self._to_read(p) for p in posts]
+        contents = mget_post_contents(self.db, [post.id for post in posts])
+        items = [self._to_read(p, contents.get(p.id)) for p in posts]
         pages = max(1, (total + size - 1) // size)
         return PaginatedResponse(items=items, total=total, page=page, size=size, pages=pages)
 
     def get_post(self, post_id: UUID, organization_id: UUID) -> PostDetail:
         post = self._get_or_404(post_id, organization_id)
+        content = get_post_content(self.db, post.id)
         detail = PostDetail.model_validate(post)
         detail.source_name = post.source.name if post.source else None
         outputs = sorted(post.ai_outputs, key=lambda o: o.created_at, reverse=True)
-        detail.ai_outputs = [AIOutputRead.model_validate(o) for o in outputs]
+        detail.ai_outputs = [self._enrich_ai_output(o, content) for o in outputs]
         detail.latest_ai = detail.ai_outputs[0] if detail.ai_outputs else None
+        self._apply_content(detail, content)
         return detail
 
     def create_post(self, organization_id: UUID, data: PostCreate) -> PostRead:
@@ -98,8 +125,8 @@ class PostService:
             source_id=data.source_id,
             board_type=data.board_type,
             title=data.title,
-            original_url=data.original_url,
-            raw_content=data.raw_content,
+            original_url=None,
+            raw_content="",
             content_hash=content_hash,
             category=data.category,
             status=status,
@@ -107,6 +134,14 @@ class PostService:
             created_by=CreatedBy.admin,
         )
         self.db.add(post)
+        self.db.flush()
+        save_post_content(
+            self.db,
+            post,
+            original_url=data.original_url,
+            body=data.raw_content,
+            merge_existing=False,
+        )
         self.db.commit()
         self.db.refresh(post)
         return self._to_read(post)
@@ -117,6 +152,7 @@ class PostService:
             setattr(post, field, value)
         self.db.commit()
         self.db.refresh(post)
+        sync_post_metadata(self.db, post)
         return self._to_read(post)
 
     def approve(self, post_id: UUID, organization_id: UUID, user: User) -> PostRead:
@@ -125,6 +161,7 @@ class PostService:
         post.reviewed_by = user.id
         post.reviewed_at = datetime.now(timezone.utc)
         self.db.commit()
+        sync_post_metadata(self.db, post)
         return self._to_read(post)
 
     def hide(self, post_id: UUID, organization_id: UUID, user: User) -> PostRead:
@@ -133,6 +170,7 @@ class PostService:
         post.reviewed_by = user.id
         post.reviewed_at = datetime.now(timezone.utc)
         self.db.commit()
+        sync_post_metadata(self.db, post)
         return self._to_read(post)
 
     def delete_post(self, post_id: UUID, organization_id: UUID, user: User) -> PostRead:
@@ -141,6 +179,8 @@ class PostService:
         post.reviewed_by = user.id
         post.reviewed_at = datetime.now(timezone.utc)
         self.db.commit()
+        sync_post_metadata(self.db, post)
+        delete_post_index(post.id)
         return self._to_read(post)
 
     def promote(self, post_id: UUID, organization_id: UUID, user: User) -> PostRead:
@@ -150,6 +190,7 @@ class PostService:
         post.reviewed_by = user.id
         post.reviewed_at = datetime.now(timezone.utc)
         self.db.commit()
+        sync_post_metadata(self.db, post)
         return self._to_read(post)
 
     def purge_stale_pending_discovery(
@@ -212,10 +253,30 @@ class PostService:
             raise NotFoundError("Post not found")
         return post
 
-    def _to_read(self, post: Post) -> PostRead:
+    def _to_read(self, post: Post, content=None) -> PostRead:
         read = PostRead.model_validate(post)
         read.source_name = post.source.name if post.source else None
+        if content is None:
+            content = get_post_content(self.db, post.id)
         if post.ai_outputs:
             latest = max(post.ai_outputs, key=lambda o: o.created_at)
-            read.latest_ai = AIOutputRead.model_validate(latest)
+            read.latest_ai = self._enrich_ai_output(latest, content)
+        self._apply_content(read, content)
         return read
+
+    @staticmethod
+    def _enrich_ai_output(output: AIOutput, content) -> AIOutputRead:
+        read = AIOutputRead.model_validate(output)
+        summary = (read.summary or "").strip()
+        if content.summary and (not summary or summary == pg_ai_summary_placeholder().strip()):
+            read.summary = content.summary
+        if content.impact:
+            read.impact = content.impact
+        if content.action_items is not None:
+            read.action_items = content.action_items
+        return read
+
+    @staticmethod
+    def _apply_content(read: PostRead, content) -> None:
+        read.original_url = content.original_url
+        read.raw_content = content.body or ""

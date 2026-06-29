@@ -40,6 +40,8 @@ from app.schemas.personalization import (
     PersonalReportRead,
     ReviewQueueRead,
 )
+from app.search.post_content import get_post_content, mget_post_contents, sync_post_metadata
+from app.search.post_search import search_post_ids
 from app.services.llm_client import get_llm_client
 
 KST = ZoneInfo("Asia/Seoul")
@@ -464,26 +466,25 @@ class ClassificationService:
         self._sync_review_queue(post, review_reasons)
         post.keywords = {"items": linked_names, "classification_version": "v2"}
         self.db.flush()
+        sync_post_metadata(self.db, post)
         return linked_names, list(dict.fromkeys(review_reasons))
 
     def _post_text_blob(self, post: Post) -> str:
-        parts = [post.title or "", post.raw_content or ""]
-        parts.extend(o.summary for o in post.ai_outputs if o.summary)
+        content = get_post_content(self.db, post.id)
+        parts = [post.title or "", content.body or "", content.summary or ""]
         return normalize_keyword(" ".join(part for part in parts if part))
 
     def _extract_classification(self, post: Post, review_reasons: list[ReviewQueueReason]) -> dict:
-        content = "\n\n".join(
+        content = get_post_content(self.db, post.id)
+        content_blob = "\n\n".join(
             part
-            for part in [
-                post.raw_content or "",
-                *(o.summary for o in post.ai_outputs if o.summary),
-            ]
+            for part in [content.body or "", content.summary or ""]
             if part
         ).strip()
-        if len(content) < 20 and len((post.title or "").strip()) < 8:
+        if len(content_blob) < 20 and len((post.title or "").strip()) < 8:
             return {}
         try:
-            return get_llm_client().classify_post_content(post.title, content or post.title)
+            return get_llm_client().classify_post_content(post.title, content_blob or post.title)
         except Exception:
             review_reasons.append(ReviewQueueReason.extraction_failed)
             return {}
@@ -568,10 +569,17 @@ class PersonalizedNewsService:
         if importance:
             q = q.where(Post.importance == importance)
         if query:
-            like = f"%{query.strip()}%"
-            q = q.outerjoin(AIOutput).where(
-                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
-            )
+            if get_settings().search_uses_elasticsearch:
+                matched_ids = search_post_ids(user.organization_id, query.strip(), limit=500)
+                if matched_ids:
+                    q = q.where(Post.id.in_(matched_ids))
+                else:
+                    return NewsPage(items=[], total=0, page=page, size=size, pages=1)
+            else:
+                like = f"%{query.strip()}%"
+                q = q.outerjoin(AIOutput).where(
+                    or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
+                )
         if date_from:
             q = q.where(Post.collected_at >= datetime.combine(date_from, datetime.min.time(), tzinfo=KST))
         if date_to:
@@ -581,7 +589,11 @@ class PersonalizedNewsService:
             )
         # DISTINCT on full Post rows fails on PostgreSQL (posts.keywords is JSON).
         posts = list(self.db.scalars(q.order_by(Post.collected_at.desc())).unique().all())
-        items = [self._to_item(post, selected, user.id) for post in posts]
+        contents = mget_post_contents(self.db, [post.id for post in posts])
+        items = [
+            self._to_item(post, selected, user.id, contents.get(post.id))
+            for post in posts
+        ]
         if personalized:
             items = self._diversified(items)
         total = len(items)
@@ -599,6 +611,7 @@ class PersonalizedNewsService:
         post: Post,
         selected: set[UUID] | None = None,
         user_id: UUID | None = None,
+        content=None,
     ) -> NewsItem:
         rows = self.db.execute(
             select(PostKeyword, Keyword)
@@ -618,6 +631,11 @@ class PersonalizedNewsService:
             if not selected or keyword.id in selected
         ]
         latest_ai = max(post.ai_outputs, key=lambda item: item.created_at) if post.ai_outputs else None
+        if content is None:
+            content = get_post_content(self.db, post.id)
+        summary = content.summary
+        if not summary and latest_ai and (latest_ai.summary or "").strip() not in ("", " "):
+            summary = latest_ai.summary
         age_hours = max(
             0.0,
             (datetime.now(timezone.utc) - self._aware(post.collected_at)).total_seconds() / 3600,
@@ -637,9 +655,9 @@ class PersonalizedNewsService:
             source_name=post.source.name if post.source else None,
             category=post.category,
             collected_at=post.collected_at,
-            original_url=post.original_url,
+            original_url=content.original_url,
             importance=post.importance,
-            summary=latest_ai.summary if latest_ai else None,
+            summary=summary,
             matched_keywords=matched,
             personalization_score=round(keyword_score + importance_score + source_score + freshness, 4),
         )

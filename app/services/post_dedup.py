@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.enums import PostStatus
 from app.models.post import Post
 from app.services.personalization_service import normalize_keyword
@@ -105,6 +106,15 @@ def find_existing_post(
 
     raw_url = (url or "").strip()
     if raw_url:
+        if get_settings().search_uses_elasticsearch:
+            from app.search.post_content import find_post_id_by_url
+
+            es_post_id = find_post_id_by_url(organization_id, raw_url)
+            if es_post_id:
+                es_post = db.get(Post, es_post_id)
+                if es_post and es_post.status not in excluded_statuses:
+                    return es_post
+
         existing = db.scalar(
             select(Post).where(
                 Post.organization_id == organization_id,

@@ -4,11 +4,14 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import get_settings
 from app.models.ai_output import AIOutput
 from app.models.enums import PostStatus
 from app.models.post import Post
 from app.models.source import Source
 from app.schemas.search import GlobalSearchResponse, SearchPostHit, SearchSourceHit
+from app.search.post_content import get_post_content, mget_post_contents
+from app.search.post_search import search_post_ids
 
 
 class SearchService:
@@ -24,14 +27,44 @@ class SearchService:
         post_limit = max(4, limit // 2 + 2)
         source_limit = max(4, limit // 2)
 
-        post_filter = self._token_filter(
-            tokens,
-            (
-                Post.title,
-                Post.raw_content,
-                AIOutput.summary,
-            ),
-        )
+        if get_settings().search_uses_elasticsearch:
+            post_ids = search_post_ids(organization_id, q, limit=post_limit)
+            posts = []
+            if post_ids:
+                posts = list(
+                    self.db.scalars(
+                        select(Post)
+                        .options(joinedload(Post.source), joinedload(Post.ai_outputs))
+                        .where(
+                            Post.organization_id == organization_id,
+                            Post.status != PostStatus.deleted,
+                            Post.id.in_(post_ids),
+                        )
+                    ).unique().all()
+                )
+                order = {pid: index for index, pid in enumerate(post_ids)}
+                posts.sort(key=lambda post: order.get(post.id, 9999))
+            contents = mget_post_contents(self.db, [post.id for post in posts])
+        else:
+            post_filter = self._token_filter(
+                tokens,
+                (
+                    Post.title,
+                    Post.raw_content,
+                    AIOutput.summary,
+                ),
+            )
+            posts = self.db.scalars(
+                select(Post)
+                .options(joinedload(Post.source), joinedload(Post.ai_outputs))
+                .outerjoin(AIOutput)
+                .where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
+                .where(post_filter)
+                .order_by(Post.collected_at.desc())
+                .limit(post_limit)
+            ).unique().all()
+            contents = {}
+
         source_filter = self._token_filter(
             tokens,
             (
@@ -40,16 +73,6 @@ class SearchService:
                 Source.category,
             ),
         )
-
-        posts = self.db.scalars(
-            select(Post)
-            .options(joinedload(Post.source), joinedload(Post.ai_outputs))
-            .outerjoin(AIOutput)
-            .where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
-            .where(post_filter)
-            .order_by(Post.collected_at.desc())
-            .limit(post_limit)
-        ).unique().all()
 
         sources = self.db.scalars(
             select(Source)
@@ -61,7 +84,7 @@ class SearchService:
 
         return GlobalSearchResponse(
             query=q,
-            posts=[self._post_hit(p) for p in posts],
+            posts=[self._post_hit(p, contents.get(p.id)) for p in posts],
             sources=[SearchSourceHit.model_validate(s) for s in sources],
         )
 
@@ -88,16 +111,19 @@ class SearchService:
             clauses.append(or_(*(col.ilike(like) for col in columns)))
         return or_(*clauses)
 
-    def _post_hit(self, post: Post) -> SearchPostHit:
-        summary = None
-        if post.ai_outputs:
+    def _post_hit(self, post: Post, content=None) -> SearchPostHit:
+        if content is None:
+            content = get_post_content(self.db, post.id)
+        summary = content.summary
+        if not summary and post.ai_outputs:
             latest = max(post.ai_outputs, key=lambda o: o.created_at)
-            summary = latest.summary
+            if (latest.summary or "").strip() not in ("", " "):
+                summary = latest.summary
         return SearchPostHit(
             id=post.id,
             title=post.title,
             board_type=post.board_type,
             source_name=post.source.name if post.source else None,
             summary=summary,
-            original_url=post.original_url,
+            original_url=content.original_url,
         )

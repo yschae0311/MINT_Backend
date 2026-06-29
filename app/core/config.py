@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     elasticsearch_index_posts_alias: str = "mint-posts-current"
     elasticsearch_request_timeout_sec: float = 10.0
     search_dual_log_diff: bool = False
+    elasticsearch_text_analyzer: str = "nori"
+    """auto: detect nori plugin | nori | standard"""
 
     @property
     def search_uses_elasticsearch(self) -> bool:

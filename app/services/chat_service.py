@@ -4,10 +4,13 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import get_settings
 from app.models.ai_output import AIOutput
 from app.models.enums import PostStatus
 from app.models.post import Post
 from app.schemas.chat import ChatAskResponse, ChatCitation
+from app.search.post_content import mget_post_contents
+from app.search.post_search import search_post_ids
 from app.services.llm_client import get_llm_client
 
 _REFUSAL_REPLY = (
@@ -191,7 +194,27 @@ class ChatService:
         seen: set[UUID] = set()
         posts: list[Post] = []
 
-        if tokens:
+        if get_settings().search_uses_elasticsearch:
+            matched_ids = search_post_ids(organization_id, question, limit=limit, min_token_len=2)
+            if matched_ids:
+                found = list(
+                    self.db.scalars(
+                        select(Post)
+                        .options(joinedload(Post.source), joinedload(Post.ai_outputs))
+                        .where(
+                            Post.organization_id == organization_id,
+                            Post.status != PostStatus.deleted,
+                            Post.id.in_(matched_ids),
+                        )
+                    ).unique().all()
+                )
+                order = {pid: index for index, pid in enumerate(matched_ids)}
+                found.sort(key=lambda post: order.get(post.id, 9999))
+                for post in found:
+                    if post.id not in seen:
+                        seen.add(post.id)
+                        posts.append(post)
+        elif tokens:
             base = (
                 select(Post)
                 .options(joinedload(Post.source), joinedload(Post.ai_outputs))
@@ -242,15 +265,19 @@ class ChatService:
     def _build_context(self, posts: list[Post]) -> tuple[str, list[ChatCitation]]:
         blocks: list[str] = []
         citations: list[ChatCitation] = []
+        contents = mget_post_contents(self.db, [post.id for post in posts])
 
         for post in posts:
-            summary = None
-            if post.ai_outputs:
+            content = contents.get(post.id)
+            summary = content.summary if content else None
+            if not summary and post.ai_outputs:
                 latest = max(post.ai_outputs, key=lambda o: o.created_at)
-                summary = latest.summary
+                if (latest.summary or "").strip() not in ("", " "):
+                    summary = latest.summary
+            original_url = content.original_url if content else post.original_url
             blocks.append(
                 f"- 제목: {post.title}\n"
-                f"  URL: {post.original_url or '(없음)'}\n"
+                f"  URL: {original_url or '(없음)'}\n"
                 f"  AI요약: {summary or '(없음)'}\n"
                 f"  중요도: {post.importance.value}"
             )
@@ -258,7 +285,7 @@ class ChatService:
                 ChatCitation(
                     post_id=post.id,
                     title=post.title,
-                    url=post.original_url,
+                    url=original_url,
                     summary=summary,
                 )
             )

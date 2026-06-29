@@ -129,13 +129,23 @@ async def ping_elasticsearch() -> tuple[str, str | None]:
 
     try:
         if not await client.ping():
-            return "error", "ping returned false"
+            return "error", "ping returned false (check URL, credentials, network)"
         info = await client.info()
         version = info.get("version", {}).get("number", "unknown")
         return "ok", version
     except Exception as exc:
         logger.warning("Elasticsearch ping failed: %s", exc)
-        return "error", str(exc)
+        name = type(exc).__name__
+        if "Timeout" in name or "timeout" in str(exc).lower():
+            return (
+                "error",
+                f"{name}: ES host unreachable (private IP 172.31.x requires VPN/SSH tunnel or run from same VPC)",
+            )
+        if "SSLError" in name or "certificate" in str(exc).lower():
+            return "error", f"{name}: {exc} — check ELASTICSEARCH_CA_CERTS"
+        if "AuthenticationException" in name or "401" in str(exc):
+            return "error", "authentication failed — check ELASTICSEARCH_USERNAME/PASSWORD"
+        return "error", f"{name}: {exc}"
 
 
 def ping_elasticsearch_sync() -> tuple[str, str | None]:

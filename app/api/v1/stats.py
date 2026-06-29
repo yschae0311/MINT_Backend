@@ -19,7 +19,7 @@ from app.schemas.stats import (
     DashboardReportHighlight,
     DashboardStatsResponse,
 )
-from app.services.org_settings_service import OrgSettingsService
+from app.search.post_content import get_post_content, mget_post_contents, pg_ai_summary_placeholder
 from app.services.post_service import PostService
 from app.services.personalization_service import ReviewQueueService
 
@@ -36,11 +36,15 @@ def _today_range_kst() -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-def _post_preview(post: Post) -> DashboardPostPreview:
-    ai_summary = None
-    if post.ai_outputs:
+def _post_preview(post: Post, db: Session, content=None) -> DashboardPostPreview:
+    if content is None:
+        content = get_post_content(db, post.id)
+    ai_summary = (content.summary or "")[:240] or None
+    if not ai_summary and post.ai_outputs:
         latest = max(post.ai_outputs, key=lambda o: o.created_at)
-        ai_summary = (latest.summary or "")[:240] or None
+        summary = (latest.summary or "").strip()
+        if summary and summary != pg_ai_summary_placeholder().strip():
+            ai_summary = summary[:240]
     return DashboardPostPreview(
         id=str(post.id),
         title=post.title,
@@ -50,7 +54,7 @@ def _post_preview(post: Post) -> DashboardPostPreview:
         status=post.status,
         importance=post.importance,
         collected_at=post.collected_at,
-        original_url=post.original_url,
+        original_url=content.original_url,
         ai_summary=ai_summary,
     )
 
@@ -81,7 +85,8 @@ def _recent_posts(
         elif exclude_community:
             q = q.where(Source.source_type.not_in(_COMMUNITY_SOURCE_TYPES))
     posts = db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).unique().all()
-    return [_post_preview(p) for p in posts]
+    contents = mget_post_contents(db, [post.id for post in posts])
+    return [_post_preview(p, db, contents.get(p.id)) for p in posts]
 
 
 @router.get("/dashboard", response_model=DashboardStatsResponse)

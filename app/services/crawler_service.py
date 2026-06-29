@@ -37,6 +37,7 @@ from app.services.gov_sources import (
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 from app.services.post_dedup import compute_content_hash, find_existing_post
+from app.search.post_content import clear_pg_text_fields, pg_ai_summary_placeholder, save_post_content
 from app.services.reddit_client import (
     RedditClient,
     is_reddit_access_denied,
@@ -513,16 +514,18 @@ class CrawlerService:
         if existing:
             if revive_deleted and existing.status == PostStatus.deleted:
                 existing.title = stored_title[:512]
-                existing.original_url = url
                 existing.published_at = published_at
-                existing.raw_content = ""
                 existing.category = source.category
                 existing.board_type = BoardType.discovery
                 existing.status = PostStatus.pending
                 existing.created_by = CreatedBy.ai_discovery
                 existing.importance = importance
+                clear_pg_text_fields(existing)
                 self._attach_discovery_ai_output(
-                    existing, evaluation, community=self._is_community_source(source)
+                    existing,
+                    evaluation,
+                    community=self._is_community_source(source),
+                    original_url=url or None,
                 )
                 return True, None
             return False, "duplicate"
@@ -532,7 +535,7 @@ class CrawlerService:
             source_id=source.id,
             board_type=BoardType.discovery,
             title=stored_title[:512],
-            original_url=url,
+            original_url=None if get_settings().search_uses_elasticsearch else (url or None),
             published_at=published_at,
             raw_content="",
             content_hash=content_hash,
@@ -545,11 +548,22 @@ class CrawlerService:
         )
         self.db.add(post)
         self.db.flush()
-        self._attach_discovery_ai_output(post, evaluation, community=self._is_community_source(source))
+        self._attach_discovery_ai_output(
+            post,
+            evaluation,
+            community=self._is_community_source(source),
+            original_url=url or None,
+        )
         return True, None
 
     def _attach_discovery_ai_output(
-        self, post: Post, evaluation: dict, *, community: bool = False
+        self,
+        post: Post,
+        evaluation: dict,
+        *,
+        community: bool = False,
+        original_url: str | None = None,
+        body: str = "",
     ) -> None:
         imp_raw = evaluation.get("importance", "medium")
         try:
@@ -560,11 +574,12 @@ class CrawlerService:
         client = get_llm_client()
         model_name = getattr(client, "summary_model", "mock")
         prompt_version = "community_v1" if community else "discovery_v2"
+        use_es = get_settings().search_uses_elasticsearch
         output = AIOutput(
             post_id=post.id,
-            summary=evaluation.get("summary", ""),
-            impact=evaluation.get("impact") or None,
-            action_items=evaluation.get("action_items") or None,
+            summary=pg_ai_summary_placeholder() if use_es else evaluation.get("summary", ""),
+            impact=None if use_es else (evaluation.get("impact") or None),
+            action_items=None if use_es else (evaluation.get("action_items") or None),
             importance=importance,
             confidence=evaluation.get("confidence"),
             model=model_name,
@@ -573,6 +588,19 @@ class CrawlerService:
         post.importance = importance
         self.db.add(output)
         self.db.flush()
+        if use_es:
+            save_post_content(
+                self.db,
+                post,
+                original_url=original_url,
+                summary=evaluation.get("summary", ""),
+                impact=evaluation.get("impact") or None,
+                body=body,
+                action_items=evaluation.get("action_items") or None,
+                merge_existing=True,
+            )
+        elif original_url:
+            post.original_url = original_url
         from app.services.personalization_service import ClassificationService
 
         ClassificationService(self.db).classify_post(post, evaluation)
@@ -740,13 +768,12 @@ class CrawlerService:
             # Optionally "revive" deleted posts when rerunning pipeline/manual crawl.
             if revive_deleted and existing.status == PostStatus.deleted:
                 existing.title = stored_title[:512]
-                existing.original_url = url or None
                 existing.published_at = published_at
-                existing.raw_content = content
                 existing.category = source.category
                 existing.status = PostStatus.pending
                 existing.board_type = BoardType.discovery
                 existing.created_by = created_by
+                clear_pg_text_fields(existing)
                 if evaluation:
                     imp_raw = evaluation.get("importance", "medium")
                     try:
@@ -754,7 +781,11 @@ class CrawlerService:
                     except ValueError:
                         existing.importance = Importance.medium
                     self._attach_discovery_ai_output(
-                        existing, evaluation, community=self._is_community_source(source)
+                        existing,
+                        evaluation,
+                        community=self._is_community_source(source),
+                        original_url=url or None,
+                        body=content,
                     )
                     if (
                         allow_auto_publish
@@ -773,9 +804,9 @@ class CrawlerService:
             # 크롤만으로는 바로 trusted로 올리지 않고, 먼저 AI 판단용 discovery에 등록
             board_type=BoardType.discovery,
             title=stored_title[:512],
-            original_url=url or None,
+            original_url=None if get_settings().search_uses_elasticsearch else (url or None),
             published_at=published_at,
-            raw_content=content,
+            raw_content="" if get_settings().search_uses_elasticsearch else content,
             content_hash=content_hash,
             category=source.category,
             status=PostStatus.pending,
@@ -792,7 +823,13 @@ class CrawlerService:
                 post.importance = Importance(imp_raw)
             except ValueError:
                 post.importance = Importance.medium
-            self._attach_discovery_ai_output(post, evaluation, community=self._is_community_source(source))
+            self._attach_discovery_ai_output(
+                post,
+                evaluation,
+                community=self._is_community_source(source),
+                original_url=url or None,
+                body=content,
+            )
             if (
                 allow_auto_publish
                 and source.auto_publish
@@ -803,6 +840,18 @@ class CrawlerService:
             else:
                 post.board_type = BoardType.discovery
                 post.status = PostStatus.pending
+        else:
+            if get_settings().search_uses_elasticsearch:
+                save_post_content(
+                    self.db,
+                    post,
+                    original_url=url or None,
+                    body=content,
+                    merge_existing=False,
+                )
+            else:
+                post.original_url = url or None
+                post.raw_content = content
 
         return True
 

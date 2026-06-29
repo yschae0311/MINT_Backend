@@ -1,56 +1,41 @@
 from __future__ import annotations
 
-import logging
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
-from app.search.es_client import get_es_client
-from app.search.index_mapping import ensure_posts_index
-from app.search.post_document import build_post_document
-
-logger = logging.getLogger(__name__)
+from app.models.post import Post
+from app.search.post_content import delete_post_content, save_post_content, sync_post_metadata
 
 
 def index_post(db: Session, post_id: UUID) -> bool:
-    settings = get_settings()
-    if not settings.search_uses_elasticsearch:
+    post = db.get(Post, post_id)
+    if not post:
         return False
-
-    client = get_es_client()
-    if client is None:
-        return False
-
-    if not ensure_posts_index():
-        return False
-
-    doc = build_post_document(db, post_id)
-    if doc is None:
-        return False
-
-    index = settings.elasticsearch_index_posts
-    try:
-        client.index(index=index, id=str(post_id), document=doc)
-        return True
-    except Exception as exc:
-        logger.warning("Failed to index post %s: %s", post_id, exc)
-        return False
+    return sync_post_metadata(db, post)
 
 
 def delete_post_index(post_id: UUID) -> bool:
-    settings = get_settings()
-    if not settings.search_uses_elasticsearch:
-        return False
+    return delete_post_content(post_id)
 
-    client = get_es_client()
-    if client is None:
-        return False
 
-    index = settings.elasticsearch_index_posts
-    try:
-        client.delete(index=index, id=str(post_id), ignore_status=[404])
-        return True
-    except Exception as exc:
-        logger.warning("Failed to delete post index %s: %s", post_id, exc)
-        return False
+def persist_new_post_content(
+    db: Session,
+    post: Post,
+    *,
+    original_url: str | None = None,
+    summary: str | None = None,
+    impact: str | None = None,
+    body: str | None = None,
+    action_items: list | None = None,
+) -> bool:
+    return save_post_content(
+        db,
+        post,
+        original_url=original_url,
+        summary=summary,
+        impact=impact,
+        body=body,
+        action_items=action_items,
+        merge_existing=False,
+    )
