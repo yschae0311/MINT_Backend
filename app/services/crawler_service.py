@@ -28,6 +28,7 @@ from app.services.community_sources import (
     is_community_source_type,
     reddit_old_post_url,
 )
+from app.services.crawl_quality import is_obvious_junk
 from app.services.crawl_progress import CrawlProgressTracker
 from app.services.crawl_skip_stats import CrawlSkipStats, classify_eval_error
 from app.services.gov_sources import (
@@ -35,7 +36,6 @@ from app.services.gov_sources import (
     extract_gov_article_text,
     is_gov_notice_host,
 )
-from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 from app.services.post_dedup import compute_content_hash, find_existing_post
 from app.search.post_content import BODY_MAX_CHARS, clear_pg_text_fields, pg_ai_summary_placeholder, save_post_content
@@ -187,8 +187,7 @@ class CrawlerService:
         """
         AI 발견 파이프라인:
         - 소스 목록/피드에서 개별 게시글 후보를 수집
-        - AI가 EV·충전 관련성을 판단하고 요약 생성
-        - discovery 게시판에는 원문 링크 + AI 요약만 저장 (본문 미저장)
+        - AI가 요약·키워딩을 시도하고, 실패 시 검수함으로 보냄
         """
         source = self.db.get(Source, source_id)
         if not source or source.organization_id != organization_id:
@@ -477,38 +476,22 @@ class CrawlerService:
         if len(content) < min_len:
             return False, "content_short"
 
-        if not passes_keyword_gate(title, content, url):
-            from app.services.ev_relevance import is_weak_topic_only
+        if is_obvious_junk(title, content, url):
+            return False, "site_junk"
 
-            reason = "weak_topic_only" if is_weak_topic_only(title, content, url) else "ai_topic_mismatch"
-            logger.debug("Discovery keyword gate rejected (%s): %s", reason, title[:80])
-            return False, reason
-
-        if stats.billing_depleted:
-            stats.add("ai_billing_depleted")
-            return False, "ai_billing_depleted"
-
-        try:
-            client = get_llm_client()
-            evaluation = client.evaluate_discovery_candidate(
-                title, content, url, community=self._is_community_source(source)
-            )
-        except Exception as exc:
-            reason = classify_eval_error(exc)
-            logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
-            stats.add(reason, sample=str(exc))
-            if reason == "ai_billing_depleted":
-                logger.error("Gemini billing depleted — skipping further AI evaluations this run")
-            return False, reason
-
-        reject = ai_reject_reason(evaluation, title, content, url)
-        if reject:
-            logger.debug(
-                "Discovery rejected: %s — %s",
-                title[:80],
-                evaluation.get("relevance_reason") or reject,
-            )
-            return False, reject
+        evaluation: dict = {}
+        if not stats.billing_depleted:
+            try:
+                client = get_llm_client()
+                evaluation = client.evaluate_discovery_candidate(
+                    title, content, url, community=self._is_community_source(source)
+                )
+            except Exception as exc:
+                reason = classify_eval_error(exc)
+                logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
+                stats.add(reason, sample=str(exc))
+                if reason == "ai_billing_depleted":
+                    logger.error("Gemini billing depleted — saving without AI for remaining items")
 
         return self._save_discovery_post(
             source, title, url, evaluation, published_at, body=content
@@ -771,21 +754,17 @@ class CrawlerService:
         if len(content) < self._min_content_len_for(source):
             return False
 
-        if not passes_keyword_gate(title, content, url or ""):
-            logger.debug("Crawl keyword gate rejected: %s", title[:80])
-            return False  # skipped without detailed reason in regular crawl stats
+        if is_obvious_junk(title, content, url or ""):
+            logger.debug("Crawl junk page skipped: %s", title[:80])
+            return False
 
-        evaluation: dict | None = None
-        if self.ai_judge_on_crawl:
-            try:
-                evaluation = get_llm_client().evaluate_discovery_candidate(
-                    title, content, url or "", community=self._is_community_source(source)
-                )
-            except Exception as exc:
-                logger.warning("Crawl AI evaluation failed for %s: %s", url, exc)
-                return False
-            if not passes_ai_evaluation(evaluation, title, content, url or ""):
-                return False
+        evaluation: dict = {}
+        try:
+            evaluation = get_llm_client().evaluate_discovery_candidate(
+                title, content, url or "", community=self._is_community_source(source)
+            )
+        except Exception as exc:
+            logger.warning("Crawl AI evaluation failed for %s: %s", url, exc)
 
         content_hash = compute_content_hash(url, title)
         stored_title = localized_title_for_storage(title)
@@ -849,41 +828,28 @@ class CrawlerService:
         self.db.add(post)
         self.db.flush()
 
-        if evaluation:
-            imp_raw = evaluation.get("importance", "medium")
-            try:
-                post.importance = Importance(imp_raw)
-            except ValueError:
-                post.importance = Importance.medium
-            self._attach_discovery_ai_output(
-                post,
-                evaluation,
-                community=self._is_community_source(source),
-                original_url=url or None,
-                body=content,
-            )
-            if (
-                allow_auto_publish
-                and source.auto_publish
-                and post.importance in (Importance.high, Importance.medium)
-            ):
-                post.board_type = BoardType.trusted
-                post.status = PostStatus.published
-            else:
-                post.board_type = BoardType.discovery
-                post.status = PostStatus.pending
+        imp_raw = evaluation.get("importance", "medium")
+        try:
+            post.importance = Importance(imp_raw)
+        except ValueError:
+            post.importance = Importance.medium
+        self._attach_discovery_ai_output(
+            post,
+            evaluation,
+            community=self._is_community_source(source),
+            original_url=url or None,
+            body=content,
+        )
+        if (
+            allow_auto_publish
+            and source.auto_publish
+            and post.importance in (Importance.high, Importance.medium)
+        ):
+            post.board_type = BoardType.trusted
+            post.status = PostStatus.published
         else:
-            if get_settings().search_uses_elasticsearch:
-                save_post_content(
-                    self.db,
-                    post,
-                    original_url=url or None,
-                    body=content,
-                    merge_existing=False,
-                )
-            else:
-                post.original_url = url or None
-                post.raw_content = content
+            post.board_type = BoardType.discovery
+            post.status = PostStatus.pending
 
         return True
 

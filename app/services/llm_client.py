@@ -6,7 +6,6 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestError
-from app.services.ev_relevance import is_obvious_junk, is_weak_topic_only, passes_keyword_gate
 from app.services.korean_output import KOREAN_RETRY_NOTE, KOREAN_USER_SUFFIX, result_needs_korean_retry, text_needs_korean
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -155,21 +154,6 @@ class GeminiClient(LLMClient):
     def evaluate_discovery_candidate(
         self, title: str, content: str, url: str, *, community: bool = False
     ) -> dict:
-        if is_obvious_junk(title, content, url) or not passes_keyword_gate(title, content, url):
-            reason = (
-                "일반 에너지·친환경 키워드만 있음"
-                if is_weak_topic_only(title, content, url)
-                else "EV/충전 직접 관련 신호 없음"
-            )
-            return {
-                "is_relevant": False,
-                "relevance_reason": reason,
-                "summary": "",
-                "impact": "",
-                "action_items": [],
-                "importance": "low",
-                "confidence": 0.9,
-            }
         prompt_name = (
             "discovery_evaluate_community_v1.md" if community else "discovery_evaluate_v1.md"
         )
@@ -179,7 +163,7 @@ class GeminiClient(LLMClient):
             self.summary_model,
             system,
             user,
-            string_fields=("relevance_reason", "summary", "impact", "category"),
+            string_fields=("summary", "impact", "category"),
             list_fields=("action_items",),
         )
 
@@ -238,22 +222,6 @@ class GeminiClient(LLMClient):
 
 
 class MockLLMClient(LLMClient):
-    _EV_HINTS = (
-        "ev",
-        "전기차",
-        "전기",
-        "충전",
-        "ocpp",
-        "csms",
-        "cpo",
-        "무공해",
-        "charging",
-        "charger",
-    )
-
-    def _looks_ev_related(self, title: str, content: str, url: str) -> bool:
-        return passes_keyword_gate(title, content, url)
-
     def translate_title(self, title: str) -> str:
         text = (title or "").strip()
         if not text_needs_korean(text):
@@ -305,28 +273,16 @@ class MockLLMClient(LLMClient):
     def evaluate_discovery_candidate(
         self, title: str, content: str, url: str, *, community: bool = False
     ) -> dict:
-        relevant = self._looks_ev_related(title, content, url)
-        if not relevant:
-            return {
-                "is_relevant": False,
-                "relevance_reason": "EV/충전 관련 키워드가 없습니다.",
-                "summary": "",
-                "impact": "",
-                "action_items": [],
-                "importance": "low",
-                "confidence": 0.4,
-            }
+        classified = self.classify_post_content(title, content)
         prefix = "커뮤니티 의견·미검증 — " if community else ""
         return {
-            "is_relevant": True,
-            "relevance_reason": "EV/충전 관련 키워드가 포함되어 있습니다.",
-            "summary": f"{prefix}{title[:120]} — EV·충전 관련 {'커뮤니티' if community else ''} 후보입니다.",
-            "impact": "충전 인프라·CSMS 운영 관점에서 확인이 필요합니다.",
-            "action_items": ["원문 링크 확인", "관련 정책·표준 모니터링"],
+            "summary": f"{prefix}{title[:120]} — 수집된 {'커뮤니티' if community else '뉴스'} 후보입니다.",
+            "impact": "조직 키워드·업무 관점에서 확인이 필요합니다.",
+            "action_items": ["원문 링크 확인"],
             "importance": "low" if community else "medium",
-            "confidence": 0.7,
-            "category": "커뮤니티/현장" if community else "충전 인프라",
-            "keywords": self._mock_keywords(title, content),
+            "confidence": classified.get("confidence", 0.7),
+            "category": classified.get("category", "기타"),
+            "keywords": classified.get("keywords", []),
         }
 
     def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:

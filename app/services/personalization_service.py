@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 import unicodedata
 from collections import defaultdict
@@ -455,15 +457,9 @@ class ClassificationService:
                 break
 
         confidence = float(merged.get("confidence") or self._latest_confidence(post) or 0)
-        if confidence < get_settings().classification_confidence_threshold:
-            review_reasons.append(ReviewQueueReason.low_confidence)
-        if not (post.category or "").strip():
-            review_reasons.append(ReviewQueueReason.uncategorized)
         if not linked_names:
             review_reasons.append(ReviewQueueReason.no_keywords)
-        if created_new_keyword:
-            review_reasons.append(ReviewQueueReason.new_keyword)
-        self._sync_review_queue(post, review_reasons)
+        self._sync_review_queue(post, list(dict.fromkeys(review_reasons)))
         post.keywords = {"items": linked_names, "classification_version": "v2"}
         self.db.flush()
         sync_post_metadata(self.db, post)
@@ -488,6 +484,156 @@ class ClassificationService:
         except Exception:
             review_reasons.append(ReviewQueueReason.extraction_failed)
             return {}
+
+    def suggest_keywords(self, post: Post) -> dict:
+        """AI keyword suggestions without persisting."""
+        content = get_post_content(self.db, post.id)
+        content_blob = "\n\n".join(
+            part
+            for part in [content.body or "", content.summary or ""]
+            if part
+        ).strip()
+        text = content_blob or (post.title or "")
+        try:
+            result = get_llm_client().classify_post_content(post.title or "", text)
+        except Exception:
+            return {"category": post.category, "suggestions": []}
+
+        org_keywords = {
+            row.normalized_name: row
+            for row in self.db.scalars(
+                select(Keyword).where(
+                    Keyword.organization_id == post.organization_id,
+                    Keyword.status.in_([KeywordStatus.active, KeywordStatus.candidate]),
+                )
+            ).all()
+        }
+        suggestions: list[dict] = []
+        seen: set[str] = set()
+        for raw in result.get("keywords") or []:
+            if isinstance(raw, str):
+                name = raw.strip()
+                confidence = float(result.get("confidence") or 0.7)
+            elif isinstance(raw, dict) and raw.get("name"):
+                name = str(raw["name"]).strip()
+                confidence = float(raw.get("confidence") or 0.7)
+            else:
+                continue
+            normalized = normalize_keyword(name)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            matched = org_keywords.get(normalized)
+            suggestions.append(
+                {
+                    "name": name[:128],
+                    "confidence": max(0.0, min(confidence, 1.0)),
+                    "keyword_id": matched.id if matched else None,
+                }
+            )
+            if len(suggestions) >= 8:
+                break
+        return {
+            "category": (result.get("category") or post.category or "").strip() or None,
+            "suggestions": suggestions,
+        }
+
+    def apply_manual_keywords(
+        self,
+        post: Post,
+        *,
+        keyword_ids: list[UUID],
+        new_keyword_names: list[str],
+        category: str | None = None,
+    ) -> list[str]:
+        """Link admin-selected keywords; clear review queue when at least one is linked."""
+        taxonomy = TaxonomyService(self.db)
+        taxonomy.ensure_defaults(post.organization_id)
+        categories = taxonomy.list_categories(post.organization_id)
+        category_by_name = {normalize_keyword(c.name): c for c in categories}
+
+        if category:
+            category_name = category.strip()
+            matched = category_by_name.get(normalize_keyword(category_name))
+            post.category = matched.name if matched else category_name[:128]
+
+        self.db.execute(delete(PostKeyword).where(PostKeyword.post_id == post.id))
+        linked_names: list[str] = []
+        seen: set[str] = set()
+
+        if keyword_ids:
+            rows = self.db.scalars(
+                select(Keyword).where(
+                    Keyword.organization_id == post.organization_id,
+                    Keyword.id.in_(keyword_ids),
+                )
+            ).all()
+            by_id = {row.id: row for row in rows}
+            for kid in keyword_ids:
+                if len(linked_names) >= 5:
+                    break
+                keyword = by_id.get(kid)
+                if not keyword or keyword.normalized_name in seen:
+                    continue
+                seen.add(keyword.normalized_name)
+                self.db.add(
+                    PostKeyword(
+                        post_id=post.id,
+                        keyword_id=keyword.id,
+                        confidence=1.0,
+                        matched_by=KeywordMatchMethod.admin,
+                    )
+                )
+                linked_names.append(keyword.name)
+
+        category_row = category_by_name.get(normalize_keyword(post.category or "기타"))
+        if not category_row:
+            category_row = category_by_name.get(normalize_keyword("기타"))
+
+        for raw_name in new_keyword_names:
+            if len(linked_names) >= 5:
+                break
+            name = (raw_name or "").strip()[:128]
+            normalized = normalize_keyword(name)
+            if not normalized or normalized in seen:
+                continue
+            keyword = self.db.scalar(
+                select(Keyword).where(
+                    Keyword.organization_id == post.organization_id,
+                    Keyword.normalized_name == normalized,
+                )
+            )
+            if not keyword:
+                keyword = Keyword(
+                    organization_id=post.organization_id,
+                    category_id=category_row.id if category_row else None,
+                    name=name,
+                    normalized_name=normalized[:128],
+                    aliases=[],
+                    scope=KeywordScope.organization,
+                    status=KeywordStatus.active,
+                )
+                self.db.add(keyword)
+                self.db.flush()
+            seen.add(normalized)
+            self.db.add(
+                PostKeyword(
+                    post_id=post.id,
+                    keyword_id=keyword.id,
+                    confidence=1.0,
+                    matched_by=KeywordMatchMethod.admin,
+                )
+            )
+            linked_names.append(keyword.name)
+
+        review_reasons: list[ReviewQueueReason] = []
+        if not linked_names:
+            review_reasons.append(ReviewQueueReason.no_keywords)
+        self._sync_review_queue(post, review_reasons)
+        post.keywords = {"items": linked_names, "classification_version": "v2"}
+        self.db.flush()
+        sync_post_metadata(self.db, post)
+        return linked_names
 
     def _latest_confidence(self, post: Post) -> float | None:
         if not post.ai_outputs:
@@ -1030,6 +1176,75 @@ class ReviewQueueService:
         self.db.commit()
         self.db.refresh(row)
         return row
+
+    def suggest_keywords(self, item_id: UUID, organization_id: UUID) -> dict:
+        row = self.db.scalar(
+            select(ReviewQueueItem).where(
+                ReviewQueueItem.id == item_id,
+                ReviewQueueItem.organization_id == organization_id,
+            )
+        )
+        if not row:
+            raise NotFoundError("Review item not found")
+        post = self.db.get(Post, row.post_id)
+        if not post or post.organization_id != organization_id:
+            raise NotFoundError("Post not found")
+        result = ClassificationService(self.db).suggest_keywords(post)
+        return {"post_id": post.id, **result}
+
+    def apply_keywords(
+        self,
+        item_id: UUID,
+        organization_id: UUID,
+        user_id: UUID,
+        *,
+        keyword_ids: list[UUID],
+        new_keyword_names: list[str],
+        category: str | None = None,
+    ) -> tuple[list[str], list[UUID]]:
+        row = self.db.scalar(
+            select(ReviewQueueItem).where(
+                ReviewQueueItem.id == item_id,
+                ReviewQueueItem.organization_id == organization_id,
+            )
+        )
+        if not row:
+            raise NotFoundError("Review item not found")
+        post = self.db.get(Post, row.post_id)
+        if not post or post.organization_id != organization_id:
+            raise NotFoundError("Post not found")
+        if not keyword_ids and not new_keyword_names:
+            raise BadRequestError("키워드를 하나 이상 선택하거나 입력해 주세요.")
+
+        pending_ids = list(
+            self.db.scalars(
+                select(ReviewQueueItem.id).where(
+                    ReviewQueueItem.post_id == post.id,
+                    ReviewQueueItem.status == ReviewQueueStatus.pending,
+                    ReviewQueueItem.reason.in_(
+                        (ReviewQueueReason.no_keywords, ReviewQueueReason.extraction_failed)
+                    ),
+                )
+            ).all()
+        )
+
+        linked = ClassificationService(self.db).apply_manual_keywords(
+            post,
+            keyword_ids=keyword_ids,
+            new_keyword_names=new_keyword_names,
+            category=category,
+        )
+        if linked and pending_ids:
+            now = datetime.now(timezone.utc)
+            for item_id in pending_ids:
+                item = self.db.get(ReviewQueueItem, item_id)
+                if not item:
+                    continue
+                item.status = ReviewQueueStatus.resolved
+                item.resolved_by = user_id
+                item.resolved_at = now
+        self.db.commit()
+        return linked, pending_ids if linked else []
 
     def _promote_keywords_for_post(self, post_id: UUID) -> None:
         """검수 완료 시 해당 기사에 연결된 후보 키워드를 활성화해 뉴스 탐색에 반영."""

@@ -123,6 +123,30 @@ class ReviewQueueResolve(BaseModel):
     detail: str | None = Field(default=None, max_length=1000)
 
 
+class KeywordSuggestion(BaseModel):
+    name: str
+    confidence: float
+    keyword_id: UUID | None = None
+
+
+class KeywordSuggestResponse(BaseModel):
+    post_id: UUID
+    category: str | None
+    suggestions: list[KeywordSuggestion]
+
+
+class ReviewQueueKeywordsApply(BaseModel):
+    keyword_ids: list[UUID] = Field(default_factory=list, max_length=5)
+    new_keyword_names: list[str] = Field(default_factory=list, max_length=5)
+    category: str | None = Field(default=None, max_length=128)
+
+
+class ReviewQueueKeywordsApplyResponse(BaseModel):
+    post_id: UUID
+    linked_keywords: list[str]
+    resolved_queue_item_ids: list[UUID]
+
+
 class ReclassifyResponse(BaseModel):
     post_id: UUID
     category: str | None

@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
@@ -20,7 +20,7 @@ from app.models.enums import (
     UserRole,
 )
 from app.models.organization import Organization
-from app.models.personalization import ReviewQueueItem
+from app.models.personalization import Keyword, ReviewQueueItem
 from app.models.post import Post
 from app.models.user import User
 from app.services.llm_client import MockLLMClient
@@ -223,6 +223,47 @@ class PersonalizationServiceTest(unittest.TestCase):
         self.assertEqual(news.total, 1)
         self.assertEqual(news.items[0].id, post.id)
         self.assertTrue(news.items[0].matched_keywords)
+
+    def test_apply_manual_keywords_resolves_review_queue(self) -> None:
+        post = self._post()
+        post.title = "일반 산업 뉴스"
+        post.raw_content = "키워드가 없는 기사 본문입니다."
+        queue_item = ReviewQueueItem(
+            organization_id=self.user.organization_id,
+            post_id=post.id,
+            reason=ReviewQueueReason.no_keywords,
+            status=ReviewQueueStatus.pending,
+        )
+        self.db.add(queue_item)
+        self.db.commit()
+
+        keyword = self.db.scalar(
+            select(Keyword).where(
+                Keyword.organization_id == self.user.organization_id,
+                Keyword.name == "OCPP",
+            )
+        )
+        self.assertIsNotNone(keyword)
+
+        linked, resolved_ids = ReviewQueueService(self.db).apply_keywords(
+            queue_item.id,
+            self.user.organization_id,
+            self.user.id,
+            keyword_ids=[keyword.id],
+            new_keyword_names=[],
+            category="CSMS/OCPP",
+        )
+        self.assertEqual(linked, ["OCPP"])
+        self.assertIn(queue_item.id, resolved_ids)
+        self.db.refresh(queue_item)
+        self.assertEqual(queue_item.status, ReviewQueueStatus.resolved)
+        pending = self.db.scalars(
+            select(ReviewQueueItem).where(
+                ReviewQueueItem.post_id == post.id,
+                ReviewQueueItem.status == ReviewQueueStatus.pending,
+            )
+        ).all()
+        self.assertEqual(len(pending), 0)
 
     def _post(self, index: int = 0) -> Post:
         post = Post(

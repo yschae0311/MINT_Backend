@@ -17,12 +17,15 @@ from app.schemas.personalization import (
     KeywordCreate,
     KeywordRead,
     KeywordMergeRequest,
+    KeywordSuggestResponse,
     KeywordUpdate,
     KeywordSubscriptionUpdate,
     NewsPage,
     PersonalReportRead,
     PersonalReportViewUpdate,
     ReclassifyResponse,
+    ReviewQueueKeywordsApply,
+    ReviewQueueKeywordsApplyResponse,
     ReviewQueueRead,
     ReviewQueueResolve,
 )
@@ -364,6 +367,47 @@ def list_review_queue(
     db: Session = Depends(get_db),
 ):
     return ReviewQueueService(db).list(user.organization_id, queue_status)
+
+
+@router.post("/review-queue/{item_id}/suggest-keywords", response_model=KeywordSuggestResponse)
+def suggest_review_queue_keywords(
+    item_id: UUID,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    result = ReviewQueueService(db).suggest_keywords(item_id, user.organization_id)
+    return KeywordSuggestResponse(
+        post_id=result["post_id"],
+        category=result.get("category"),
+        suggestions=result.get("suggestions") or [],
+    )
+
+
+@router.put("/review-queue/{item_id}/keywords", response_model=ReviewQueueKeywordsApplyResponse)
+def apply_review_queue_keywords(
+    item_id: UUID,
+    data: ReviewQueueKeywordsApply,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    from app.models.personalization import ReviewQueueItem
+
+    item = db.get(ReviewQueueItem, item_id)
+    if not item or item.organization_id != user.organization_id:
+        raise NotFoundError("Review item not found")
+    linked, resolved_ids = ReviewQueueService(db).apply_keywords(
+        item_id,
+        user.organization_id,
+        user.id,
+        keyword_ids=data.keyword_ids,
+        new_keyword_names=data.new_keyword_names,
+        category=data.category,
+    )
+    return ReviewQueueKeywordsApplyResponse(
+        post_id=item.post_id,
+        linked_keywords=linked,
+        resolved_queue_item_ids=resolved_ids,
+    )
 
 
 @router.post("/review-queue/reclassify-all", response_model=JobRead)
