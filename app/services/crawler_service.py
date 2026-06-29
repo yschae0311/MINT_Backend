@@ -28,6 +28,7 @@ from app.services.community_sources import (
     is_community_source_type,
     reddit_old_post_url,
 )
+from app.services.crawl_progress import CrawlProgressTracker
 from app.services.crawl_skip_stats import CrawlSkipStats, classify_eval_error
 from app.services.gov_sources import (
     extract_gov_article_links,
@@ -83,6 +84,11 @@ class CrawlerService:
             re.I,
         )
         self.trusted_list_max_candidates = 15
+        self._discovery_progress: CrawlProgressTracker | None = None
+
+    def _tick_discovery_progress(self, created: bool) -> None:
+        if self._discovery_progress is not None:
+            self._discovery_progress.on_candidate_done(created=created)
 
     def _fetch_url(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
@@ -171,7 +177,13 @@ class CrawlerService:
             message=f"Created {created}, skipped {skipped}",
         )
 
-    def crawl_source_to_discovery(self, source_id: UUID, organization_id: UUID) -> CrawlResult:
+    def crawl_source_to_discovery(
+        self,
+        source_id: UUID,
+        organization_id: UUID,
+        *,
+        progress: CrawlProgressTracker | None = None,
+    ) -> CrawlResult:
         """
         AI 발견 파이프라인:
         - 소스 목록/피드에서 개별 게시글 후보를 수집
@@ -184,17 +196,21 @@ class CrawlerService:
         if not source.is_active:
             raise BadRequestError("Source is inactive")
 
-        stats = CrawlSkipStats()
-        if source.source_type == SourceType.reddit:
-            created, skipped = self._crawl_discovery_reddit(source, stats)
-        elif source.source_type == SourceType.community_forum:
-            created, skipped = self._crawl_discovery_community_forum(source, stats)
-        elif source.source_type == SourceType.rss:
-            created, skipped = self._crawl_discovery_rss(source, stats)
-        elif source.source_type in (SourceType.news_page, SourceType.notice_page):
-            created, skipped = self._crawl_discovery_list_page(source, stats)
-        else:
-            created, skipped = self._crawl_discovery_single_page(source, stats)
+        self._discovery_progress = progress
+        try:
+            stats = CrawlSkipStats()
+            if source.source_type == SourceType.reddit:
+                created, skipped = self._crawl_discovery_reddit(source, stats)
+            elif source.source_type == SourceType.community_forum:
+                created, skipped = self._crawl_discovery_community_forum(source, stats)
+            elif source.source_type == SourceType.rss:
+                created, skipped = self._crawl_discovery_rss(source, stats)
+            elif source.source_type in (SourceType.news_page, SourceType.notice_page):
+                created, skipped = self._crawl_discovery_list_page(source, stats)
+            else:
+                created, skipped = self._crawl_discovery_single_page(source, stats)
+        finally:
+            self._discovery_progress = None
 
         source.last_crawled_at = datetime.now(timezone.utc)
         self.db.commit()
@@ -222,6 +238,7 @@ class CrawlerService:
             if not title or not post_url:
                 skipped += 1
                 stats.add("no_url")
+                self._tick_discovery_progress(False)
                 continue
 
             content = self._enrich_reddit_post_content(title, post_url, content)
@@ -234,6 +251,7 @@ class CrawlerService:
             else:
                 skipped += 1
                 stats.add(reason or "other")
+            self._tick_discovery_progress(ok)
         return created, skipped
 
     def _fetch_reddit_listing_candidates(
@@ -300,6 +318,7 @@ class CrawlerService:
             except Exception:
                 skipped += 1
                 stats.add("fetch_failed")
+                self._tick_discovery_progress(False)
                 continue
             ok, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
             if ok:
@@ -307,6 +326,7 @@ class CrawlerService:
             else:
                 skipped += 1
                 stats.add(reason or "other")
+            self._tick_discovery_progress(ok)
         return created, skipped
 
     def _crawl_discovery_rss(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
@@ -318,6 +338,7 @@ class CrawlerService:
             if not url:
                 skipped += 1
                 stats.add("no_url")
+                self._tick_discovery_progress(False)
                 continue
 
             content = entry.get("summary") or entry.get("description") or ""
@@ -329,6 +350,7 @@ class CrawlerService:
                 except Exception:
                     skipped += 1
                     stats.add("fetch_failed")
+                    self._tick_discovery_progress(False)
                     continue
 
             published = None
@@ -341,6 +363,7 @@ class CrawlerService:
             else:
                 skipped += 1
                 stats.add(reason or "other")
+            self._tick_discovery_progress(ok)
         return created, skipped
 
     def _crawl_discovery_list_page(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
@@ -358,6 +381,7 @@ class CrawlerService:
             except Exception:
                 skipped += 1
                 stats.add("fetch_failed")
+                self._tick_discovery_progress(False)
                 continue
             ok, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
             if ok:
@@ -365,6 +389,7 @@ class CrawlerService:
             else:
                 skipped += 1
                 stats.add(reason or "other")
+            self._tick_discovery_progress(ok)
         return created, skipped
 
     def _crawl_discovery_single_page(
@@ -381,6 +406,7 @@ class CrawlerService:
         content = self._extract_main_text(soup, source.source_type)
         content = re.sub(r"\s+", " ", content).strip()[:BODY_MAX_CHARS]
         ok, reason = self._process_discovery_candidate(source, title, source.url, content, None, stats)
+        self._tick_discovery_progress(ok)
         if ok:
             return 1, 0
         stats.add(reason or "other")
@@ -867,10 +893,13 @@ class CrawlerService:
         organization_id: UUID,
         *,
         to_discovery: bool,
+        progress: CrawlProgressTracker | None = None,
     ) -> CrawlResult:
         try:
             if to_discovery:
-                return self.crawl_source_to_discovery(source.id, organization_id)
+                return self.crawl_source_to_discovery(
+                    source.id, organization_id, progress=progress
+                )
             return self.crawl_source(source.id, organization_id)
         except Exception as exc:
             logger.warning("Crawl failed for source %s (%s): %s", source.id, source.url, exc)

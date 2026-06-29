@@ -14,6 +14,7 @@ from app.models.source import Source
 from app.models.user import User
 from app.services.ai_service import AIService
 from app.services.community_sources import COMMUNITY_SOURCE_TYPES
+from app.services.crawl_progress import CrawlProgressTracker, estimate_discovery_candidates_per_source
 from app.services.crawl_skip_stats import CrawlSkipStats
 from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService
@@ -52,17 +53,37 @@ def _run_crawl_all(
         q = q.where(Source.source_type.not_in(tuple(COMMUNITY_SOURCE_TYPES)))
         q = q.where(Source.trust_level != TrustLevel.low)
     sources = list(db.scalars(q).all())
-    total = len(sources)
-    jobs.update_progress(job_id, 0, total, f"0/{total} 소스 준비")
-
     created_sum = 0
     stats = CrawlSkipStats()
     failed = 0
+
+    if to_discovery:
+        estimated_total = sum(estimate_discovery_candidates_per_source(s) for s in sources) or 1
+        progress = CrawlProgressTracker(
+            jobs,
+            job_id,
+            source_total=len(sources),
+            estimated_candidate_total=estimated_total,
+        )
+        progress.begin()
+    else:
+        progress = None
+        total = len(sources)
+        jobs.update_progress(job_id, 0, total, f"0/{total} 소스 준비")
+
     for i, source in enumerate(sources, start=1):
         if jobs.is_cancelled(job_id):
             return "사용자에 의해 취소됨"
-        jobs.update_progress(job_id, i - 1, total, f"{i}/{total} · {source.name}")
-        result = crawler._crawl_source_safe(source, organization_id, to_discovery=to_discovery)
+        if to_discovery:
+            progress.on_source_start(i, source.name)
+        else:
+            jobs.update_progress(job_id, i - 1, total, f"{i}/{total} · {source.name}")
+        result = crawler._crawl_source_safe(
+            source,
+            organization_id,
+            to_discovery=to_discovery,
+            progress=progress,
+        )
         created_sum += result.created
         for reason, count in (result.skip_reasons or {}).items():
             stats.add(reason, count)
@@ -72,7 +93,10 @@ def _run_crawl_all(
             failed += 1
             stats.add("source_error")
 
-    jobs.update_progress(job_id, total, total, "완료")
+    if to_discovery and progress is not None:
+        progress.finish()
+    else:
+        jobs.update_progress(job_id, total, total, "완료")
     return stats.format_summary(created_sum, failed_sources=failed)
 
 
@@ -100,10 +124,26 @@ def crawl_source_job_task(job_id: str, source_id: str, organization_id: str, to_
         jobs.start_job(UUID(job_id))
         if jobs.is_cancelled(UUID(job_id)):
             return
-        jobs.update_progress(UUID(job_id), 0, 1, "크롤링 중…")
         crawler = CrawlerService(db)
+        progress = None
         if to_discovery:
-            result = crawler.crawl_source_to_discovery(UUID(source_id), UUID(organization_id))
+            source = db.get(Source, UUID(source_id))
+            estimated = estimate_discovery_candidates_per_source(source) if source else 1
+            progress = CrawlProgressTracker(
+                jobs,
+                UUID(job_id),
+                source_total=1,
+                estimated_candidate_total=estimated,
+            )
+            progress.begin(source_name=source.name if source else None)
+        else:
+            jobs.update_progress(UUID(job_id), 0, 1, "크롤링 중…")
+        if to_discovery:
+            result = crawler.crawl_source_to_discovery(
+                UUID(source_id), UUID(organization_id), progress=progress
+            )
+            if progress is not None:
+                progress.finish()
         else:
             result = crawler.crawl_source(UUID(source_id), UUID(organization_id))
         msg = result.message or f"created {result.created}, skipped {result.skipped}"
