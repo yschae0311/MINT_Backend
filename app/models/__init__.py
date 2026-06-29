@@ -14,6 +14,7 @@ from app.models.personalization import (
     ReviewQueueItem,
     UserKeywordSubscription,
 )
+from app.models.search_index_queue import SearchIndexQueue
 from app.models.post import Post
 from app.models.slack_webhook import SlackWebhook
 from app.models.source import Source
@@ -40,4 +41,5 @@ __all__ = [
     "PersonalReportItem",
     "PersonalReportView",
     "ReviewQueueItem",
+    "SearchIndexQueue",
 ]

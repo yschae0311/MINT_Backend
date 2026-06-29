@@ -141,3 +141,8 @@ class ReviewQueueStatus(str, enum.Enum):
     pending = "pending"
     resolved = "resolved"
     excluded = "excluded"
+
+
+class SearchIndexAction(str, enum.Enum):
+    index = "index"
+    delete = "delete"

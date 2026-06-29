@@ -15,8 +15,8 @@ def index_post(db: Session, post_id: UUID) -> bool:
     return sync_post_metadata(db, post)
 
 
-def delete_post_index(post_id: UUID) -> bool:
-    return delete_post_content(post_id)
+def delete_post_index(db: Session, post_id: UUID) -> bool:
+    return delete_post_content(post_id, db=db)
 
 
 def persist_new_post_content(

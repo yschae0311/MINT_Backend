@@ -10,7 +10,7 @@ from app.models.enums import PostStatus
 from app.models.post import Post
 from app.schemas.chat import ChatAskResponse, ChatCitation
 from app.search.post_content import mget_post_contents
-from app.search.post_search import search_post_ids
+from app.search.search_resolve import resolve_search_post_ids
 from app.services.llm_client import get_llm_client
 
 _REFUSAL_REPLY = (
@@ -194,27 +194,33 @@ class ChatService:
         seen: set[UUID] = set()
         posts: list[Post] = []
 
-        if get_settings().search_uses_elasticsearch:
-            matched_ids = search_post_ids(organization_id, question, limit=limit, min_token_len=2)
-            if matched_ids:
-                found = list(
-                    self.db.scalars(
-                        select(Post)
-                        .options(joinedload(Post.source), joinedload(Post.ai_outputs))
-                        .where(
-                            Post.organization_id == organization_id,
-                            Post.status != PostStatus.deleted,
-                            Post.id.in_(matched_ids),
-                        )
-                    ).unique().all()
-                )
-                order = {pid: index for index, pid in enumerate(matched_ids)}
-                found.sort(key=lambda post: order.get(post.id, 9999))
-                for post in found:
-                    if post.id not in seen:
-                        seen.add(post.id)
-                        posts.append(post)
-        elif tokens:
+        matched_ids = resolve_search_post_ids(
+            self.db,
+            organization_id,
+            question,
+            limit=limit,
+            min_token_len=2,
+            chat=True,
+        )
+        if matched_ids:
+            found = list(
+                self.db.scalars(
+                    select(Post)
+                    .options(joinedload(Post.source), joinedload(Post.ai_outputs))
+                    .where(
+                        Post.organization_id == organization_id,
+                        Post.status != PostStatus.deleted,
+                        Post.id.in_(matched_ids),
+                    )
+                ).unique().all()
+            )
+            order = {pid: index for index, pid in enumerate(matched_ids)}
+            found.sort(key=lambda post: order.get(post.id, 9999))
+            for post in found:
+                if post.id not in seen:
+                    seen.add(post.id)
+                    posts.append(post)
+        elif not get_settings().search_uses_elasticsearch:
             base = (
                 select(Post)
                 .options(joinedload(Post.source), joinedload(Post.ai_outputs))

@@ -44,4 +44,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.send_daily_report_to_slack_task",
         "schedule": crontab(hour=8, minute=30),
     },
+    "process-search-index-queue": {
+        "task": "app.workers.tasks.process_search_index_queue_task",
+        "schedule": 60.0,
+    },
 }

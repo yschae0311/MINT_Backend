@@ -2,10 +2,9 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.models.ai_output import AIOutput
 from app.models.enums import BoardType, CreatedBy, PostStatus
@@ -22,7 +21,7 @@ from app.search.post_content import (
     sync_post_metadata,
 )
 from app.search.post_indexer import delete_post_index
-from app.search.post_search import search_post_ids
+from app.search.search_resolve import resolve_search_post_ids
 
 
 class PostService:
@@ -58,17 +57,10 @@ class PostService:
         if source_id:
             q = q.where(Post.source_id == source_id)
         if keyword:
-            if get_settings().search_uses_elasticsearch:
-                matched_ids = search_post_ids(organization_id, keyword, limit=500)
-                if matched_ids:
-                    q = q.where(Post.id.in_(matched_ids))
-                else:
-                    return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
-            else:
-                like = f"%{keyword}%"
-                q = q.outerjoin(AIOutput).where(
-                    or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
-                )
+            matched_ids = resolve_search_post_ids(self.db, organization_id, keyword, limit=500)
+            if not matched_ids:
+                return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
+            q = q.where(Post.id.in_(matched_ids))
 
         count_q = select(func.count(func.distinct(Post.id))).select_from(Post)
         count_q = count_q.where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
@@ -83,17 +75,10 @@ class PostService:
         if source_id:
             count_q = count_q.where(Post.source_id == source_id)
         if keyword:
-            if get_settings().search_uses_elasticsearch:
-                matched_ids = search_post_ids(organization_id, keyword, limit=500)
-                if matched_ids:
-                    count_q = count_q.where(Post.id.in_(matched_ids))
-                else:
-                    return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
-            else:
-                like = f"%{keyword}%"
-                count_q = count_q.outerjoin(AIOutput).where(
-                    or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
-                )
+            matched_ids = resolve_search_post_ids(self.db, organization_id, keyword, limit=500)
+            if not matched_ids:
+                return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
+            count_q = count_q.where(Post.id.in_(matched_ids))
         total = self.db.scalar(count_q) or 0
         posts = self.db.scalars(
             q.order_by(Post.collected_at.desc()).offset((page - 1) * size).limit(size)
@@ -180,7 +165,7 @@ class PostService:
         post.reviewed_at = datetime.now(timezone.utc)
         self.db.commit()
         sync_post_metadata(self.db, post)
-        delete_post_index(post.id)
+        delete_post_index(self.db, post.id)
         return self._to_read(post)
 
     def promote(self, post_id: UUID, organization_id: UUID, user: User) -> PostRead:

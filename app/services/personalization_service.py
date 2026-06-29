@@ -41,7 +41,7 @@ from app.schemas.personalization import (
     ReviewQueueRead,
 )
 from app.search.post_content import get_post_content, mget_post_contents, sync_post_metadata
-from app.search.post_search import search_post_ids
+from app.search.search_resolve import resolve_search_post_ids
 from app.services.llm_client import get_llm_client
 
 KST = ZoneInfo("Asia/Seoul")
@@ -569,17 +569,12 @@ class PersonalizedNewsService:
         if importance:
             q = q.where(Post.importance == importance)
         if query:
-            if get_settings().search_uses_elasticsearch:
-                matched_ids = search_post_ids(user.organization_id, query.strip(), limit=500)
-                if matched_ids:
-                    q = q.where(Post.id.in_(matched_ids))
-                else:
-                    return NewsPage(items=[], total=0, page=page, size=size, pages=1)
-            else:
-                like = f"%{query.strip()}%"
-                q = q.outerjoin(AIOutput).where(
-                    or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
-                )
+            matched_ids = resolve_search_post_ids(
+                self.db, user.organization_id, query.strip(), limit=500
+            )
+            if not matched_ids:
+                return NewsPage(items=[], total=0, page=page, size=size, pages=1)
+            q = q.where(Post.id.in_(matched_ids))
         if date_from:
             q = q.where(Post.collected_at >= datetime.combine(date_from, datetime.min.time(), tzinfo=KST))
         if date_to:

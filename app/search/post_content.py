@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import get_settings
 from app.models.ai_output import AIOutput
-from app.models.enums import KeywordStatus
+from app.models.enums import KeywordStatus, SearchIndexAction
 from app.models.personalization import Keyword, PostKeyword
 from app.models.post import Post
 from app.search.es_client import get_es_client
@@ -249,10 +249,6 @@ def save_post_content(
             post.raw_content = body or ""
         return False
 
-    client = get_es_client()
-    if client is None or not ensure_posts_index():
-        return False
-
     if merge_existing:
         base = get_post_content(db, post.id, fallback_legacy=True)
     else:
@@ -265,6 +261,18 @@ def save_post_content(
         body=body if body is not None else base.body,
         action_items=action_items if action_items is not None else base.action_items,
     )
+
+    client = get_es_client()
+    if client is None or not ensure_posts_index():
+        from app.search.index_outbox import content_to_payload, enqueue_search_index
+
+        enqueue_search_index(
+            db,
+            post.id,
+            SearchIndexAction.index,
+            payload=content_to_payload(content),
+        )
+        return False
 
     if post.source is None and post.source_id:
         db.refresh(post, attribute_names=["source"])
@@ -280,6 +288,14 @@ def save_post_content(
         return True
     except Exception as exc:
         logger.warning("Failed to save post content to ES %s: %s", post.id, exc)
+        from app.search.index_outbox import content_to_payload, enqueue_search_index
+
+        enqueue_search_index(
+            db,
+            post.id,
+            SearchIndexAction.index,
+            payload=content_to_payload(content),
+        )
         return False
 
 
@@ -298,12 +314,16 @@ def sync_post_metadata(db: Session, post: Post) -> bool:
     )
 
 
-def delete_post_content(post_id: UUID) -> bool:
+def delete_post_content(post_id: UUID, db: Session | None = None) -> bool:
     settings = get_settings()
     if not settings.search_uses_elasticsearch:
         return False
     client = get_es_client()
     if client is None:
+        if db is not None:
+            from app.search.index_outbox import enqueue_search_index
+
+            enqueue_search_index(db, post_id, SearchIndexAction.delete)
         return False
     try:
         client.delete(
@@ -314,4 +334,8 @@ def delete_post_content(post_id: UUID) -> bool:
         return True
     except Exception as exc:
         logger.warning("Failed to delete ES post %s: %s", post_id, exc)
+        if db is not None:
+            from app.search.index_outbox import enqueue_search_index
+
+            enqueue_search_index(db, post_id, SearchIndexAction.delete)
         return False

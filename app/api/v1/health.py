@@ -25,6 +25,12 @@ async def health_check(db: Session = Depends(get_db)):
 
         es_index_ready = ensure_posts_index()
 
+    search_index_pending = None
+    if settings.search_uses_elasticsearch:
+        from app.search.index_outbox import pending_search_index_count
+
+        search_index_pending = pending_search_index_count(db)
+
     overall_ok = db_status == "ok"
     if settings.search_backend == "elasticsearch" and es_status != "ok":
         overall_ok = False
@@ -42,5 +48,6 @@ async def health_check(db: Session = Depends(get_db)):
             "detail": es_detail,
             "index": settings.elasticsearch_index_posts if es_status != "disabled" else None,
             "index_ready": es_index_ready,
+            "index_queue_pending": search_index_pending,
         },
     }

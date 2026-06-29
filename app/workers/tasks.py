@@ -76,6 +76,22 @@ def _run_crawl_all(
     return stats.format_summary(created_sum, failed_sources=failed)
 
 
+@celery_app.task(name="app.workers.tasks.process_search_index_queue_task")
+def process_search_index_queue_task(batch_size: int = 50):
+    from app.search.index_outbox import process_search_index_queue
+
+    db = SessionLocal()
+    try:
+        ok, failed = process_search_index_queue(db, batch_size=batch_size)
+        if ok or failed:
+            logger.info("search index queue processed ok=%s failed=%s", ok, failed)
+    except Exception as exc:
+        logger.exception("process_search_index_queue_task failed: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.workers.tasks.crawl_source_job_task")
 def crawl_source_job_task(job_id: str, source_id: str, organization_id: str, to_discovery: bool = False):
     db = SessionLocal()
