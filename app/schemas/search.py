@@ -13,6 +13,8 @@ class SearchPostHit(BaseModel):
     source_name: str | None = None
     summary: str | None = None
     original_url: str | None = None
+    title_highlight: str | None = None
+    summary_highlight: str | None = None
 
 
 class SearchSourceHit(ORMBase):

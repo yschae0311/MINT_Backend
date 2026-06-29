@@ -60,6 +60,8 @@ class PostRead(ORMBase):
     created_at: datetime
     updated_at: datetime
     latest_ai: AIOutputRead | None = None
+    title_highlight: str | None = None
+    summary_highlight: str | None = None
 
 
 class PostDetail(PostRead):

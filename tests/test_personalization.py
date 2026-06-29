@@ -1,4 +1,5 @@
 import hashlib
+import os
 import unittest
 from datetime import datetime
 from unittest.mock import patch
@@ -6,6 +7,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.config import get_settings
 from app.core.database import Base
 from app.models.enums import (
     AccountApprovalStatus,
@@ -33,6 +35,10 @@ from app.services.personalization_service import (
 
 class PersonalizationServiceTest(unittest.TestCase):
     def setUp(self) -> None:
+        self._prev_search_backend = os.environ.get("SEARCH_BACKEND")
+        os.environ["SEARCH_BACKEND"] = "postgres"
+        get_settings.cache_clear()
+
         self.engine = create_engine(
             "sqlite:///:memory:",
             execution_options={"schema_translate_map": {"mint": None}},
@@ -61,6 +67,11 @@ class PersonalizationServiceTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
+        if self._prev_search_backend is None:
+            os.environ.pop("SEARCH_BACKEND", None)
+        else:
+            os.environ["SEARCH_BACKEND"] = self._prev_search_backend
+        get_settings.cache_clear()
 
     def test_requires_at_least_three_keywords(self) -> None:
         keywords = self.taxonomy.list_keywords(self.user)

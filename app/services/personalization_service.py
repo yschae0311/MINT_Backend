@@ -41,7 +41,7 @@ from app.schemas.personalization import (
     ReviewQueueRead,
 )
 from app.search.post_content import get_post_content, mget_post_contents, sync_post_metadata
-from app.search.search_resolve import resolve_search_post_ids
+from app.search.post_search_query import PostSearchFilters, load_posts_ordered, search_posts
 from app.services.llm_client import get_llm_client
 
 KST = ZoneInfo("Asia/Seoul")
@@ -552,6 +552,22 @@ class PersonalizedNewsService:
         if personalized and not selected:
             return NewsPage(items=[], total=0, page=page, size=size, pages=1)
 
+        if get_settings().search_uses_elasticsearch:
+            es_page = self._list_news_es(
+                user,
+                selected=selected,
+                personalized=personalized,
+                category=category,
+                importance=importance,
+                query=query,
+                date_from=date_from,
+                date_to=date_to,
+                page=page,
+                size=size,
+            )
+            if es_page is not None:
+                return es_page
+
         q = (
             select(Post)
             .options(joinedload(Post.source), joinedload(Post.ai_outputs))
@@ -569,12 +585,10 @@ class PersonalizedNewsService:
         if importance:
             q = q.where(Post.importance == importance)
         if query:
-            matched_ids = resolve_search_post_ids(
-                self.db, user.organization_id, query.strip(), limit=500
+            like = f"%{query.strip()}%"
+            q = q.outerjoin(AIOutput).where(
+                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
             )
-            if not matched_ids:
-                return NewsPage(items=[], total=0, page=page, size=size, pages=1)
-            q = q.where(Post.id.in_(matched_ids))
         if date_from:
             q = q.where(Post.collected_at >= datetime.combine(date_from, datetime.min.time(), tzinfo=KST))
         if date_to:
@@ -601,12 +615,92 @@ class PersonalizedNewsService:
             pages=max(1, (total + size - 1) // size),
         )
 
+    def _list_news_es(
+        self,
+        user: User,
+        *,
+        selected: set[UUID],
+        personalized: bool,
+        category: str | None,
+        importance: Importance | None,
+        query: str | None,
+        date_from: date | None,
+        date_to: date | None,
+        page: int,
+        size: int,
+    ) -> NewsPage | None:
+        date_from_dt = None
+        date_to_dt = None
+        if date_from:
+            date_from_dt = datetime.combine(date_from, datetime.min.time(), tzinfo=KST)
+        if date_to:
+            date_to_dt = datetime.combine(
+                date_to + timedelta(days=1), datetime.min.time(), tzinfo=KST
+            )
+
+        filters = PostSearchFilters(
+            organization_id=user.organization_id,
+            query=(query or "").strip() or None,
+            exclude_statuses=["deleted", "hidden"],
+            category=category,
+            importance=importance.value if importance else None,
+            keyword_ids=list(selected) if selected else None,
+            date_from=date_from_dt,
+            date_to=date_to_dt,
+        )
+        highlight = bool((query or "").strip())
+        fetch_page = 1 if personalized else page
+        fetch_size = 500 if personalized else size
+        result = search_posts(
+            filters,
+            page=fetch_page,
+            size=fetch_size,
+            highlight=highlight,
+        )
+        if result is None:
+            return None
+
+        posts = load_posts_ordered(self.db, [hit.post_id for hit in result.hits])
+        hit_by_id = {hit.post_id: hit for hit in result.hits}
+        contents = mget_post_contents(self.db, [post.id for post in posts])
+        items = [
+            self._to_item(
+                post,
+                selected,
+                user.id,
+                contents.get(post.id),
+                hit=hit_by_id.get(post.id),
+            )
+            for post in posts
+        ]
+        if personalized:
+            items = self._diversified(items)
+            total = len(items)
+            offset = (page - 1) * size
+            return NewsPage(
+                items=items[offset : offset + size],
+                total=total,
+                page=page,
+                size=size,
+                pages=max(1, (total + size - 1) // size),
+            )
+
+        pages = max(1, (result.total + size - 1) // size)
+        return NewsPage(
+            items=items,
+            total=result.total,
+            page=page,
+            size=size,
+            pages=pages,
+        )
+
     def _to_item(
         self,
         post: Post,
         selected: set[UUID] | None = None,
         user_id: UUID | None = None,
         content=None,
+        hit=None,
     ) -> NewsItem:
         rows = self.db.execute(
             select(PostKeyword, Keyword)
@@ -653,6 +747,7 @@ class PersonalizedNewsService:
             original_url=content.original_url,
             importance=post.importance,
             summary=summary,
+            summary_highlight=hit.highlight_summary if hit else None,
             matched_keywords=matched,
             personalization_score=round(keyword_score + importance_score + source_score + freshness, 4),
         )

@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.models.ai_output import AIOutput
 from app.models.enums import BoardType, CreatedBy, PostStatus
@@ -21,7 +22,7 @@ from app.search.post_content import (
     sync_post_metadata,
 )
 from app.search.post_indexer import delete_post_index
-from app.search.search_resolve import resolve_search_post_ids
+from app.search.post_search_query import PostSearchFilters, load_posts_ordered, search_posts
 
 
 class PostService:
@@ -40,6 +41,21 @@ class PostService:
         page: int = 1,
         size: int = 20,
     ) -> PaginatedResponse[PostRead]:
+        if get_settings().search_uses_elasticsearch:
+            es_page = self._list_posts_es(
+                organization_id,
+                board_type=board_type,
+                status=status,
+                importance=importance,
+                category=category,
+                keyword=keyword,
+                source_id=source_id,
+                page=page,
+                size=size,
+            )
+            if es_page is not None:
+                return es_page
+
         q = (
             select(Post)
             .options(joinedload(Post.source), joinedload(Post.ai_outputs))
@@ -57,10 +73,13 @@ class PostService:
         if source_id:
             q = q.where(Post.source_id == source_id)
         if keyword:
-            matched_ids = resolve_search_post_ids(self.db, organization_id, keyword, limit=500)
-            if not matched_ids:
-                return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
-            q = q.where(Post.id.in_(matched_ids))
+            like = f"%{keyword}%"
+            from app.models.ai_output import AIOutput
+            from sqlalchemy import or_
+
+            q = q.outerjoin(AIOutput).where(
+                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
+            )
 
         count_q = select(func.count(func.distinct(Post.id))).select_from(Post)
         count_q = count_q.where(Post.organization_id == organization_id, Post.status != PostStatus.deleted)
@@ -75,10 +94,13 @@ class PostService:
         if source_id:
             count_q = count_q.where(Post.source_id == source_id)
         if keyword:
-            matched_ids = resolve_search_post_ids(self.db, organization_id, keyword, limit=500)
-            if not matched_ids:
-                return PaginatedResponse(items=[], total=0, page=page, size=size, pages=1)
-            count_q = count_q.where(Post.id.in_(matched_ids))
+            like = f"%{keyword}%"
+            from app.models.ai_output import AIOutput
+            from sqlalchemy import or_
+
+            count_q = count_q.outerjoin(AIOutput).where(
+                or_(Post.title.ilike(like), Post.raw_content.ilike(like), AIOutput.summary.ilike(like))
+            )
         total = self.db.scalar(count_q) or 0
         posts = self.db.scalars(
             q.order_by(Post.collected_at.desc()).offset((page - 1) * size).limit(size)
@@ -227,6 +249,52 @@ class PostService:
             )
             or 0
         )
+
+    def _list_posts_es(
+        self,
+        organization_id: UUID,
+        *,
+        board_type: BoardType | None,
+        status: PostStatus | None,
+        importance: str | None,
+        category: str | None,
+        keyword: str | None,
+        source_id: UUID | None,
+        page: int,
+        size: int,
+    ) -> PaginatedResponse[PostRead] | None:
+        filters = PostSearchFilters(
+            organization_id=organization_id,
+            query=(keyword or "").strip() or None,
+            board_type=board_type.value if board_type else None,
+            status=status.value if status else None,
+            exclude_statuses=[] if status else ["deleted"],
+            category=category,
+            importance=importance,
+            source_id=source_id,
+        )
+        result = search_posts(
+            filters,
+            page=page,
+            size=size,
+            highlight=bool((keyword or "").strip()),
+        )
+        if result is None:
+            return None
+
+        posts = load_posts_ordered(self.db, [hit.post_id for hit in result.hits])
+        hit_by_id = {hit.post_id: hit for hit in result.hits}
+        contents = mget_post_contents(self.db, [post.id for post in posts])
+        items: list[PostRead] = []
+        for post in posts:
+            read = self._to_read(post, contents.get(post.id))
+            hit = hit_by_id.get(post.id)
+            if hit:
+                read.title_highlight = hit.highlight_title
+                read.summary_highlight = hit.highlight_summary
+            items.append(read)
+        pages = max(1, (result.total + size - 1) // size)
+        return PaginatedResponse(items=items, total=result.total, page=page, size=size, pages=pages)
 
     def _get_or_404(self, post_id: UUID, organization_id: UUID) -> Post:
         post = self.db.scalars(

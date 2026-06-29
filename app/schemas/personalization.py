@@ -73,6 +73,7 @@ class NewsItem(BaseModel):
     original_url: str | None
     importance: Importance
     summary: str | None
+    summary_highlight: str | None = None
     matched_keywords: list[MatchedKeyword]
     personalization_score: float = 0
 
