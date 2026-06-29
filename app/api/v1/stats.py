@@ -204,6 +204,7 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
             db,
             org_id,
             board_type=BoardType.discovery,
+            status=PostStatus.published,
             community_only=True,
             limit=5,
         ),

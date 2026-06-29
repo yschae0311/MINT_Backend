@@ -14,6 +14,7 @@ from app.models.post import Post
 from app.schemas.post import PostRead
 from app.schemas.report import DailyReportDetail, DailyReportItemRead, DailyReportRead
 from app.search.post_content import get_post_content, legacy_pg_content_enabled, pg_ai_summary_placeholder
+from app.services.llm_client import get_llm_client
 from app.services.report_illustration_service import ReportIllustrationService
 
 KST = ZoneInfo("Asia/Seoul")

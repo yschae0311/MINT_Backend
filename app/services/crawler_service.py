@@ -639,6 +639,9 @@ class CrawlerService:
             content=content,
             skip_es_sync=use_es,
         )
+        needs_review = _needs_keywording_review(review_reasons)
+        post.status = PostStatus.pending if needs_review else PostStatus.published
+        self.db.flush()
 
         if use_es:
             save_post_content(
@@ -654,7 +657,7 @@ class CrawlerService:
         elif original_url:
             post.original_url = original_url
 
-        return _needs_keywording_review(review_reasons)
+        return needs_review
 
     def _crawl_rss(
         self,
