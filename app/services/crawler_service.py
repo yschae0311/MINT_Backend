@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.ai_output import AIOutput
-from app.models.enums import BoardType, CreatedBy, Importance, PostStatus, SourceType, TrustLevel
+from app.models.enums import BoardType, CreatedBy, Importance, PostStatus, ReviewQueueReason, SourceType, TrustLevel
 from app.models.post import Post
 from app.models.source import Source
 from app.schemas.source import CrawlResult
@@ -29,7 +29,7 @@ from app.services.community_sources import (
     reddit_old_post_url,
 )
 from app.services.crawl_quality import is_obvious_junk
-from app.services.crawl_progress import CrawlProgressTracker
+from app.services.crawl_progress import CandidateOutcome, CrawlProgressTracker
 from app.services.crawl_skip_stats import CrawlSkipStats, classify_eval_error
 from app.services.gov_sources import (
     extract_gov_article_links,
@@ -48,6 +48,15 @@ from app.services.reddit_client import (
 from app.services.title_translation import localized_title_for_storage
 
 logger = logging.getLogger(__name__)
+
+_KEYWORDING_REVIEW_REASONS = frozenset(
+    {ReviewQueueReason.no_keywords, ReviewQueueReason.extraction_failed}
+)
+
+
+def _needs_keywording_review(reasons: list[ReviewQueueReason]) -> bool:
+    return any(reason in _KEYWORDING_REVIEW_REASONS for reason in reasons)
+
 
 _DEFAULT_HEADERS = {
     "User-Agent": (
@@ -86,9 +95,9 @@ class CrawlerService:
         self.trusted_list_max_candidates = 15
         self._discovery_progress: CrawlProgressTracker | None = None
 
-    def _tick_discovery_progress(self, created: bool) -> None:
+    def _tick_discovery_progress(self, outcome: CandidateOutcome) -> None:
         if self._discovery_progress is not None:
-            self._discovery_progress.on_candidate_done(created=created)
+            self._discovery_progress.on_candidate_done(outcome=outcome)
 
     def _start_discovery_candidate(self, title: str) -> None:
         if self._discovery_progress is not None:
@@ -241,20 +250,19 @@ class CrawlerService:
             if not title or not post_url:
                 skipped += 1
                 stats.add("no_url")
-                self._tick_discovery_progress(False)
+                self._tick_discovery_progress("skipped")
                 continue
 
             content = self._enrich_reddit_post_content(title, post_url, content)
 
-            ok, reason = self._process_discovery_candidate(
+            outcome, reason = self._process_discovery_candidate(
                 source, title, post_url, content, published, stats
             )
-            if ok:
-                created += 1
-            else:
+            if outcome == "skipped":
                 skipped += 1
                 stats.add(reason or "other")
-            self._tick_discovery_progress(ok)
+            else:
+                created += 1
         return created, skipped
 
     def _fetch_reddit_listing_candidates(
@@ -321,15 +329,14 @@ class CrawlerService:
             except Exception:
                 skipped += 1
                 stats.add("fetch_failed")
-                self._tick_discovery_progress(False)
+                self._tick_discovery_progress("skipped")
                 continue
-            ok, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
-            if ok:
-                created += 1
-            else:
+            outcome, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
+            if outcome == "skipped":
                 skipped += 1
                 stats.add(reason or "other")
-            self._tick_discovery_progress(ok)
+            else:
+                created += 1
         return created, skipped
 
     def _crawl_discovery_rss(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
@@ -341,7 +348,7 @@ class CrawlerService:
             if not url:
                 skipped += 1
                 stats.add("no_url")
-                self._tick_discovery_progress(False)
+                self._tick_discovery_progress("skipped")
                 continue
 
             content = entry.get("summary") or entry.get("description") or ""
@@ -353,20 +360,19 @@ class CrawlerService:
                 except Exception:
                     skipped += 1
                     stats.add("fetch_failed")
-                    self._tick_discovery_progress(False)
+                    self._tick_discovery_progress("skipped")
                     continue
 
             published = None
             if entry.get("published_parsed"):
                 published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
 
-            ok, reason = self._process_discovery_candidate(source, title, url, content, published, stats)
-            if ok:
-                created += 1
-            else:
+            outcome, reason = self._process_discovery_candidate(source, title, url, content, published, stats)
+            if outcome == "skipped":
                 skipped += 1
                 stats.add(reason or "other")
-            self._tick_discovery_progress(ok)
+            else:
+                created += 1
         return created, skipped
 
     def _crawl_discovery_list_page(self, source: Source, stats: CrawlSkipStats) -> tuple[int, int]:
@@ -384,15 +390,14 @@ class CrawlerService:
             except Exception:
                 skipped += 1
                 stats.add("fetch_failed")
-                self._tick_discovery_progress(False)
+                self._tick_discovery_progress("skipped")
                 continue
-            ok, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
-            if ok:
-                created += 1
-            else:
+            outcome, reason = self._process_discovery_candidate(source, title, url, content, None, stats)
+            if outcome == "skipped":
                 skipped += 1
                 stats.add(reason or "other")
-            self._tick_discovery_progress(ok)
+            else:
+                created += 1
         return created, skipped
 
     def _crawl_discovery_single_page(
@@ -408,12 +413,11 @@ class CrawlerService:
         title = soup.title.string.strip() if soup.title and soup.title.string else source.name
         content = self._extract_main_text(soup, source.source_type)
         content = re.sub(r"\s+", " ", content).strip()[:BODY_MAX_CHARS]
-        ok, reason = self._process_discovery_candidate(source, title, source.url, content, None, stats)
-        self._tick_discovery_progress(ok)
-        if ok:
-            return 1, 0
-        stats.add(reason or "other")
-        return 0, 1
+        outcome, reason = self._process_discovery_candidate(source, title, source.url, content, None, stats)
+        if outcome == "skipped":
+            stats.add(reason or "other")
+            return 0, 1
+        return 1, 0
 
     def _fetch_article_text(self, url: str, source_type: SourceType) -> str:
         resp = self._fetch_url(url)
@@ -471,17 +475,20 @@ class CrawlerService:
         content: str,
         published_at: datetime | None,
         stats: CrawlSkipStats,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[CandidateOutcome, str | None]:
         title = (title or "").strip()[:512]
         content = (content or "").strip()
         min_len = self._min_content_len_for(source)
         if not title or len(title) < 2:
-            return False, "title_invalid"
+            self._tick_discovery_progress("skipped")
+            return "skipped", "title_invalid"
         if len(content) < min_len:
-            return False, "content_short"
+            self._tick_discovery_progress("skipped")
+            return "skipped", "content_short"
 
         if is_obvious_junk(title, content, url):
-            return False, "site_junk"
+            self._tick_discovery_progress("skipped")
+            return "skipped", "site_junk"
 
         self._start_discovery_candidate(title)
 
@@ -499,9 +506,15 @@ class CrawlerService:
                 if reason == "ai_billing_depleted":
                     logger.error("Gemini billing depleted — saving without AI for remaining items")
 
-        return self._save_discovery_post(
+        ok, reason, needs_review = self._save_discovery_post(
             source, title, url, evaluation, published_at, body=content
         )
+        if not ok:
+            self._tick_discovery_progress("skipped")
+            return "skipped", reason
+        outcome: CandidateOutcome = "review" if needs_review else "passed"
+        self._tick_discovery_progress(outcome)
+        return outcome, None
 
     def _save_discovery_post(
         self,
@@ -513,7 +526,7 @@ class CrawlerService:
         *,
         body: str = "",
         revive_deleted: bool = True,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, bool]:
         imp_raw = evaluation.get("importance", "medium")
         try:
             importance = Importance(imp_raw)
@@ -540,15 +553,15 @@ class CrawlerService:
                 existing.created_by = CreatedBy.ai_discovery
                 existing.importance = importance
                 clear_pg_text_fields(existing)
-                self._attach_discovery_ai_output(
+                needs_review = self._attach_discovery_ai_output(
                     existing,
                     evaluation,
                     community=self._is_community_source(source),
                     original_url=url or None,
                     body=stored_body,
                 )
-                return True, None
-            return False, "duplicate"
+                return True, None, needs_review
+            return False, "duplicate", False
 
         post = Post(
             organization_id=source.organization_id,
@@ -568,14 +581,14 @@ class CrawlerService:
         )
         self.db.add(post)
         self.db.flush()
-        self._attach_discovery_ai_output(
+        needs_review = self._attach_discovery_ai_output(
             post,
             evaluation,
             community=self._is_community_source(source),
             original_url=url or None,
             body=stored_body,
         )
-        return True, None
+        return True, None, needs_review
 
     def _attach_discovery_ai_output(
         self,
@@ -585,7 +598,7 @@ class CrawlerService:
         community: bool = False,
         original_url: str | None = None,
         body: str = "",
-    ) -> None:
+    ) -> bool:
         imp_raw = evaluation.get("importance", "medium")
         try:
             importance = Importance(imp_raw)
@@ -624,7 +637,8 @@ class CrawlerService:
             post.original_url = original_url
         from app.services.personalization_service import ClassificationService
 
-        ClassificationService(self.db).classify_post(post, evaluation)
+        _, review_reasons = ClassificationService(self.db).classify_post(post, evaluation)
+        return _needs_keywording_review(review_reasons)
 
     def _crawl_rss(
         self,
@@ -954,10 +968,10 @@ class CrawlerService:
         if note:
             content = f"{note.strip()}\n\n{content}".strip()
 
-        ok, reason = self._process_discovery_candidate(
+        outcome, reason = self._process_discovery_candidate(
             manual_source, page_title, url, content, None, stats
         )
-        if ok:
+        if outcome != "skipped":
             post = find_existing_post(self.db, organization_id, url, page_title)
             if post:
                 post.created_by = CreatedBy.user_submitted

@@ -38,14 +38,16 @@ class CrawlProgressTests(unittest.TestCase):
             estimated_candidate_total=30,
         )
         tracker.on_source_start(1, "정책브리핑")
-        tracker.on_candidate_done(created=True)
-        tracker.on_candidate_done(created=False)
+        tracker.on_candidate_done(outcome="passed")
+        tracker.on_candidate_done(outcome="review")
+        tracker.on_candidate_done(outcome="skipped")
         tracker.finish()
 
         last_call = jobs.update_progress.call_args_list[-1]
-        self.assertEqual(last_call.args[1], 2)
-        self.assertIn("2 / 30", last_call.args[3])
+        self.assertEqual(last_call.args[1], 3)
+        self.assertIn("3 / 30", last_call.args[3])
         self.assertIn("등록 1", last_call.args[3])
+        self.assertIn("검수 1", last_call.args[3])
         self.assertIn("스킵 1", last_call.args[3])
 
 
