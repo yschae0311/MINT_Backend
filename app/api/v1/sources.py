@@ -98,6 +98,7 @@ def crawl_all_to_discovery(
         label,
         triggered_by=user.id,
     )
+    jobs.update_progress(job.id, 0, 1, "워커 시작 대기 중…")
     db.commit()
     dispatch_task(
         crawl_all_discovery_job_task,

@@ -90,6 +90,10 @@ class CrawlerService:
         if self._discovery_progress is not None:
             self._discovery_progress.on_candidate_done(created=created)
 
+    def _start_discovery_candidate(self, title: str) -> None:
+        if self._discovery_progress is not None:
+            self._discovery_progress.on_candidate_start(title)
+
     def _fetch_url(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(self.fetch_retries):
@@ -478,6 +482,8 @@ class CrawlerService:
 
         if is_obvious_junk(title, content, url):
             return False, "site_junk"
+
+        self._start_discovery_candidate(title)
 
         evaluation: dict = {}
         if not stats.billing_depleted:

@@ -44,7 +44,7 @@ class CrawlProgressTests(unittest.TestCase):
 
         last_call = jobs.update_progress.call_args_list[-1]
         self.assertEqual(last_call.args[1], 2)
-        self.assertIn("2건 처리", last_call.args[3])
+        self.assertIn("2 / 30", last_call.args[3])
         self.assertIn("등록 1", last_call.args[3])
         self.assertIn("스킵 1", last_call.args[3])
 

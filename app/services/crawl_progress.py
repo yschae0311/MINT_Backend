@@ -11,7 +11,7 @@ from app.models.source import Source
 from app.services.community_sources import COMMUNITY_SOURCE_TYPES
 from app.services.job_service import JobService
 
-_FLUSH_INTERVAL_SEC = 0.8
+_FLUSH_INTERVAL_SEC = 0.4
 
 
 def estimate_discovery_candidates_per_source(source: Source) -> int:
@@ -32,6 +32,7 @@ class CrawlProgressTracker:
     skipped: int = 0
     current_source_index: int = 0
     current_source_name: str = ""
+    current_candidate_title: str = ""
     _last_flush_at: float = field(default=0.0, repr=False)
 
     def begin(self, *, source_name: str | None = None) -> None:
@@ -42,10 +43,16 @@ class CrawlProgressTracker:
     def on_source_start(self, index: int, source_name: str) -> None:
         self.current_source_index = index
         self.current_source_name = source_name
+        self.current_candidate_title = ""
+        self._flush(force=True)
+
+    def on_candidate_start(self, title: str) -> None:
+        self.current_candidate_title = (title or "").strip()[:80]
         self._flush(force=True)
 
     def on_candidate_done(self, *, created: bool) -> None:
         self.processed += 1
+        self.current_candidate_title = ""
         if created:
             self.created += 1
         else:
@@ -62,8 +69,13 @@ class CrawlProgressTracker:
         )
 
     def _message(self, *, done: bool = False) -> str:
-        parts = [f"{self.processed}건 처리", f"등록 {self.created}", f"스킵 {self.skipped}"]
-        if self.source_total > 1 and self.current_source_name and not done:
+        total = max(self.estimated_candidate_total, self.processed, 1)
+        parts = [f"{self.processed} / {total}건"]
+        parts.append(f"등록 {self.created}")
+        parts.append(f"스킵 {self.skipped}")
+        if self.current_candidate_title and not done:
+            parts.append(f"분석 중: {self.current_candidate_title}")
+        elif self.source_total > 1 and self.current_source_name and not done:
             parts.append(f"소스 {self.current_source_index}/{self.source_total} · {self.current_source_name}")
         elif self.current_source_name and self.source_total == 1 and not done:
             parts.append(self.current_source_name)

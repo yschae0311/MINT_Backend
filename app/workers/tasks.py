@@ -32,6 +32,25 @@ def _kst_today() -> date:
     return datetime.now(KST).date()
 
 
+def _discovery_sources_query(
+    organization_id: UUID,
+    *,
+    to_discovery: bool,
+    trusted_only: bool,
+    community_only: bool = False,
+    exclude_community: bool = False,
+):
+    q = select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
+    if community_only:
+        q = q.where(Source.source_type.in_(tuple(COMMUNITY_SOURCE_TYPES)))
+    elif to_discovery and trusted_only:
+        q = q.where(Source.trust_level == TrustLevel.high)
+    if exclude_community and not community_only:
+        q = q.where(Source.source_type.not_in(tuple(COMMUNITY_SOURCE_TYPES)))
+        q = q.where(Source.trust_level != TrustLevel.low)
+    return q
+
+
 def _run_crawl_all(
     db,
     jobs: JobService,
@@ -44,14 +63,13 @@ def _run_crawl_all(
     exclude_community: bool = False,
 ) -> str:
     crawler = CrawlerService(db)
-    q = select(Source).where(Source.organization_id == organization_id, Source.is_active.is_(True))
-    if community_only:
-        q = q.where(Source.source_type.in_(tuple(COMMUNITY_SOURCE_TYPES)))
-    elif to_discovery and trusted_only:
-        q = q.where(Source.trust_level == TrustLevel.high)
-    if exclude_community and not community_only:
-        q = q.where(Source.source_type.not_in(tuple(COMMUNITY_SOURCE_TYPES)))
-        q = q.where(Source.trust_level != TrustLevel.low)
+    q = _discovery_sources_query(
+        organization_id,
+        to_discovery=to_discovery,
+        trusted_only=trusted_only,
+        community_only=community_only,
+        exclude_community=exclude_community,
+    )
     sources = list(db.scalars(q).all())
     created_sum = 0
     stats = CrawlSkipStats()
@@ -173,6 +191,20 @@ def crawl_all_discovery_job_task(
         jobs.start_job(UUID(job_id))
         if jobs.is_cancelled(UUID(job_id)):
             return
+        q = _discovery_sources_query(
+            UUID(organization_id),
+            to_discovery=True,
+            trusted_only=trusted_only,
+            community_only=community_only,
+        )
+        sources = list(db.scalars(q).all())
+        estimated = sum(estimate_discovery_candidates_per_source(s) for s in sources) or 1
+        jobs.update_progress(
+            UUID(job_id),
+            0,
+            estimated,
+            f"0 / {estimated}건 · 준비",
+        )
         msg = _run_crawl_all(
             db,
             jobs,
