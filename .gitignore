@@ -222,3 +222,7 @@ __marimo__/
 
 # Generated report illustrations
 uploads/
+
+# Elasticsearch TLS (from ca_certs.zip — do not commit)
+certs/elasticsearch/*
+!certs/elasticsearch/README.md

@@ -58,6 +58,33 @@ class Settings(BaseSettings):
     """EC2 등 datacenter IP에서 Reddit RSS가 403이면 HTTP 프록시(선택)"""
     reddit_http_proxy: str = ""
 
+    # Elasticsearch — 전문 검색·챗봇 RAG (미설정 시 PostgreSQL ILIKE 유지)
+    search_backend: str = "postgres"
+    """postgres | elasticsearch | dual"""
+    elasticsearch_url: str = ""
+    elasticsearch_username: str = ""
+    elasticsearch_password: str = ""
+    elasticsearch_ca_certs: str = ""
+    """CA bundle path (.crt/.pem). Relative paths resolve from MINT_Backend root."""
+    elasticsearch_verify_certs: bool = True
+    elasticsearch_index_posts: str = "mint-posts-v1"
+    elasticsearch_index_posts_alias: str = "mint-posts-current"
+    elasticsearch_request_timeout_sec: float = 10.0
+    search_dual_log_diff: bool = False
+
+    @property
+    def search_uses_elasticsearch(self) -> bool:
+        return bool(self.elasticsearch_url.strip()) and self.search_backend in (
+            "elasticsearch",
+            "dual",
+        )
+
+    @property
+    def search_uses_postgres(self) -> bool:
+        if not self.elasticsearch_url.strip():
+            return True
+        return self.search_backend in ("postgres", "dual")
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
