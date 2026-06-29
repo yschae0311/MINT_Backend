@@ -45,6 +45,11 @@ def pg_ai_summary_placeholder() -> str:
     return _PG_AI_SUMMARY_PLACEHOLDER
 
 
+def legacy_pg_content_enabled() -> bool:
+    """When false, URL/summary/body are read from Elasticsearch only."""
+    return not get_settings().search_uses_elasticsearch
+
+
 def _content_from_legacy_post(post: Post) -> PostContent:
     latest_ai: AIOutput | None = None
     if post.ai_outputs:
@@ -92,7 +97,9 @@ def _document_from_source(source: dict[str, Any]) -> PostContent:
     )
 
 
-def get_post_content(db: Session, post_id: UUID, *, fallback_legacy: bool = True) -> PostContent:
+def get_post_content(db: Session, post_id: UUID, *, fallback_legacy: bool | None = None) -> PostContent:
+    if fallback_legacy is None:
+        fallback_legacy = legacy_pg_content_enabled()
     doc = _fetch_es_document(post_id)
     if doc:
         return _document_from_source(doc)
@@ -111,8 +118,10 @@ def get_post_content(db: Session, post_id: UUID, *, fallback_legacy: bool = True
 
 
 def mget_post_contents(
-    db: Session, post_ids: list[UUID], *, fallback_legacy: bool = True
+    db: Session, post_ids: list[UUID], *, fallback_legacy: bool | None = None
 ) -> dict[UUID, PostContent]:
+    if fallback_legacy is None:
+        fallback_legacy = legacy_pg_content_enabled()
     settings = get_settings()
     results: dict[UUID, PostContent] = {}
     missing: list[UUID] = []
@@ -250,7 +259,7 @@ def save_post_content(
         return False
 
     if merge_existing:
-        base = get_post_content(db, post.id, fallback_legacy=True)
+        base = get_post_content(db, post.id, fallback_legacy=legacy_pg_content_enabled())
     else:
         base = PostContent()
 
@@ -301,7 +310,7 @@ def save_post_content(
 
 def sync_post_metadata(db: Session, post: Post) -> bool:
     """Re-index ES document after PG metadata-only changes (status, category, etc.)."""
-    content = get_post_content(db, post.id, fallback_legacy=True)
+    content = get_post_content(db, post.id, fallback_legacy=legacy_pg_content_enabled())
     return save_post_content(
         db,
         post,

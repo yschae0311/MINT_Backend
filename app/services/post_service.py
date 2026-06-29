@@ -16,6 +16,7 @@ from app.schemas.common import PaginatedResponse
 from app.schemas.post import AIOutputRead, PostCreate, PostDetail, PostRead, PostUpdate
 from app.search.post_content import (
     get_post_content,
+    legacy_pg_content_enabled,
     mget_post_contents,
     pg_ai_summary_placeholder,
     save_post_content,
@@ -41,7 +42,7 @@ class PostService:
         page: int = 1,
         size: int = 20,
     ) -> PaginatedResponse[PostRead]:
-        if get_settings().search_uses_elasticsearch:
+        if get_settings().search_uses_elasticsearch and (keyword or "").strip():
             es_page = self._list_posts_es(
                 organization_id,
                 board_type=board_type,
@@ -320,13 +321,21 @@ class PostService:
     @staticmethod
     def _enrich_ai_output(output: AIOutput, content) -> AIOutputRead:
         read = AIOutputRead.model_validate(output)
-        summary = (read.summary or "").strip()
-        if content.summary and (not summary or summary == pg_ai_summary_placeholder().strip()):
-            read.summary = content.summary
-        if content.impact:
-            read.impact = content.impact
-        if content.action_items is not None:
-            read.action_items = content.action_items
+        if legacy_pg_content_enabled():
+            summary = (read.summary or "").strip()
+            if content.summary and (not summary or summary == pg_ai_summary_placeholder().strip()):
+                read.summary = content.summary
+            if content.impact:
+                read.impact = content.impact
+            if content.action_items is not None:
+                read.action_items = content.action_items
+        else:
+            if content.summary:
+                read.summary = content.summary
+            if content.impact:
+                read.impact = content.impact
+            if content.action_items is not None:
+                read.action_items = content.action_items
         return read
 
     @staticmethod

@@ -13,7 +13,7 @@ from app.models.enums import BoardType, Importance, PostStatus
 from app.models.post import Post
 from app.schemas.post import PostRead
 from app.schemas.report import DailyReportDetail, DailyReportItemRead, DailyReportRead
-from app.search.post_content import get_post_content, pg_ai_summary_placeholder
+from app.search.post_content import get_post_content, legacy_pg_content_enabled, pg_ai_summary_placeholder
 from app.services.report_illustration_service import ReportIllustrationService
 
 KST = ZoneInfo("Asia/Seoul")
@@ -87,7 +87,7 @@ class ReportService:
             return content.body.strip()[:500]
         if content.summary and content.summary.strip():
             return content.summary.strip()[:500]
-        if post.ai_outputs:
+        if legacy_pg_content_enabled() and post.ai_outputs:
             latest = max(post.ai_outputs, key=lambda o: o.created_at)
             summary = (latest.summary or "").strip()
             if summary and summary != pg_ai_summary_placeholder().strip():

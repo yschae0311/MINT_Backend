@@ -19,7 +19,7 @@ from app.schemas.stats import (
     DashboardReportHighlight,
     DashboardStatsResponse,
 )
-from app.search.post_content import get_post_content, mget_post_contents, pg_ai_summary_placeholder
+from app.search.post_content import get_post_content, legacy_pg_content_enabled, mget_post_contents, pg_ai_summary_placeholder
 from app.services.post_service import PostService
 from app.services.personalization_service import ReviewQueueService
 
@@ -40,7 +40,7 @@ def _post_preview(post: Post, db: Session, content=None) -> DashboardPostPreview
     if content is None:
         content = get_post_content(db, post.id)
     ai_summary = (content.summary or "")[:240] or None
-    if not ai_summary and post.ai_outputs:
+    if not ai_summary and legacy_pg_content_enabled() and post.ai_outputs:
         latest = max(post.ai_outputs, key=lambda o: o.created_at)
         summary = (latest.summary or "").strip()
         if summary and summary != pg_ai_summary_placeholder().strip():

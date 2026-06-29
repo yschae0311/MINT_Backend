@@ -40,7 +40,7 @@ from app.schemas.personalization import (
     PersonalReportRead,
     ReviewQueueRead,
 )
-from app.search.post_content import get_post_content, mget_post_contents, sync_post_metadata
+from app.search.post_content import get_post_content, mget_post_contents, legacy_pg_content_enabled, sync_post_metadata
 from app.search.post_search_query import PostSearchFilters, load_posts_ordered, search_posts
 from app.services.llm_client import get_llm_client
 
@@ -552,7 +552,7 @@ class PersonalizedNewsService:
         if personalized and not selected:
             return NewsPage(items=[], total=0, page=page, size=size, pages=1)
 
-        if get_settings().search_uses_elasticsearch:
+        if get_settings().search_uses_elasticsearch and (query or "").strip():
             es_page = self._list_news_es(
                 user,
                 selected=selected,
@@ -723,7 +723,12 @@ class PersonalizedNewsService:
         if content is None:
             content = get_post_content(self.db, post.id)
         summary = content.summary
-        if not summary and latest_ai and (latest_ai.summary or "").strip() not in ("", " "):
+        if (
+            not summary
+            and legacy_pg_content_enabled()
+            and latest_ai
+            and (latest_ai.summary or "").strip() not in ("", " ")
+        ):
             summary = latest_ai.summary
         age_hours = max(
             0.0,

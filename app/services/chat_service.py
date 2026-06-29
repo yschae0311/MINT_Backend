@@ -9,7 +9,7 @@ from app.models.ai_output import AIOutput
 from app.models.enums import PostStatus
 from app.models.post import Post
 from app.schemas.chat import ChatAskResponse, ChatCitation
-from app.search.post_content import mget_post_contents
+from app.search.post_content import legacy_pg_content_enabled, mget_post_contents
 from app.search.search_resolve import resolve_search_post_ids
 from app.services.llm_client import get_llm_client
 
@@ -276,11 +276,11 @@ class ChatService:
         for post in posts:
             content = contents.get(post.id)
             summary = content.summary if content else None
-            if not summary and post.ai_outputs:
+            if not summary and post.ai_outputs and legacy_pg_content_enabled():
                 latest = max(post.ai_outputs, key=lambda o: o.created_at)
                 if (latest.summary or "").strip() not in ("", " "):
                     summary = latest.summary
-            original_url = content.original_url if content else post.original_url
+            original_url = content.original_url if content else (post.original_url if legacy_pg_content_enabled() else None)
             blocks.append(
                 f"- 제목: {post.title}\n"
                 f"  URL: {original_url or '(없음)'}\n"
