@@ -20,6 +20,7 @@ from app.schemas.stats import (
     DashboardStatsResponse,
 )
 from app.search.post_content import get_post_content, legacy_pg_content_enabled, mget_post_contents, pg_ai_summary_placeholder
+from app.services.org_settings_service import OrgSettingsService
 from app.services.post_service import PostService
 from app.services.personalization_service import ReviewQueueService
 
