@@ -1,5 +1,6 @@
 import logging
 import re
+from collections.abc import Mapping
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from app.services.post_service import PostService
 
 logger = logging.getLogger(__name__)
 
+_FRAME_ANCESTORS_RE = re.compile(r"frame-ancestors\s+([^;]+)", re.I)
 _STRIP_TAGS = ("script", "iframe", "object", "embed", "form", "noscript")
 _PREVIEW_CSS = """
 <style data-mint-preview>
@@ -23,10 +25,87 @@ _PREVIEW_CSS = """
 """
 
 
+def _normalize_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {k.lower(): v for k, v in headers.items()}
+
+
+def _csp_blocks_frame_embed(csp: str) -> bool:
+    match = _FRAME_ANCESTORS_RE.search(csp)
+    if not match:
+        return False
+
+    tokens = [t.strip().lower() for t in match.group(1).split() if t.strip()]
+    if not tokens:
+        return False
+    if "'none'" in tokens or "none" in tokens:
+        return True
+    if tokens == ["'self'"] or tokens == ["self"]:
+        return True
+    if "*" in tokens:
+        return False
+    return True
+
+
+def iframe_embed_blocked(headers: Mapping[str, str], html_head: str = "") -> bool:
+    """Return True when the page likely blocks cross-origin iframe embed."""
+    lowered = _normalize_headers(headers)
+
+    xfo = lowered.get("x-frame-options", "").strip().upper()
+    if xfo in ("DENY", "SAMEORIGIN"):
+        return True
+
+    for key in ("content-security-policy", "content-security-policy-report-only"):
+        csp = lowered.get(key, "")
+        if csp and _csp_blocks_frame_embed(csp):
+            return True
+
+    if not html_head:
+        return False
+
+    soup = BeautifulSoup(html_head, "html.parser")
+    for meta in soup.find_all("meta"):
+        http_equiv = (meta.get("http-equiv") or "").strip().lower()
+        content = (meta.get("content") or "").strip().upper()
+        if http_equiv == "x-frame-options" and content in ("DENY", "SAMEORIGIN"):
+            return True
+        if http_equiv == "content-security-policy" and _csp_blocks_frame_embed(content):
+            return True
+
+    return False
+
+
 class OriginalPreviewService:
     def __init__(self, db: Session):
         self.db = db
         self.timeout = 15.0
+
+    def can_embed_in_iframe(self, post_id: UUID, organization_id: UUID) -> bool:
+        post = PostService(self.db).get_post(post_id, organization_id)
+        url = (post.original_url or "").strip()
+        if not url:
+            return False
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+
+        try:
+            with httpx.Client(
+                timeout=self.timeout,
+                follow_redirects=True,
+                headers=_DEFAULT_HEADERS,
+            ) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("embed check fetch failed url=%s err=%s", url, exc)
+            return False
+
+        html_head = ""
+        if "html" in resp.headers.get("content-type", "").lower() or "<html" in resp.text[:500].lower():
+            html_head = resp.text[:8192]
+
+        return not iframe_embed_blocked(resp.headers, html_head)
 
     def build_preview(self, post_id: UUID, organization_id: UUID) -> str:
         post = PostService(self.db).get_post(post_id, organization_id)

@@ -10,7 +10,7 @@ from app.core.security import get_current_user
 from app.models.enums import BoardType, Importance, PostStatus
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
-from app.schemas.post import AIOutputRead, PostCreate, PostDetail, PostRead, PostUpdate
+from app.schemas.post import AIOutputRead, EmbedCheckResponse, PostCreate, PostDetail, PostRead, PostUpdate
 from app.services.ai_service import AIService
 from app.services.original_preview_service import OriginalPreviewService
 from app.services.post_service import PostService
@@ -51,6 +51,16 @@ def get_post(
     db: Session = Depends(get_db),
 ):
     return PostService(db).get_post(post_id, user.organization_id)
+
+
+@router.get("/{post_id}/embed-check", response_model=EmbedCheckResponse)
+def embed_check(
+    post_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    embeddable = OriginalPreviewService(db).can_embed_in_iframe(post_id, user.organization_id)
+    return EmbedCheckResponse(embeddable=embeddable)
 
 
 @router.get("/{post_id}/original-preview", response_class=HTMLResponse)

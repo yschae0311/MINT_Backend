@@ -69,6 +69,10 @@ class PostDetail(PostRead):
     ai_outputs: list[AIOutputRead] = []
 
 
+class EmbedCheckResponse(BaseModel):
+    embeddable: bool
+
+
 class PostListParams(BaseModel):
     board_type: BoardType | None = None
     status: PostStatus | None = None
