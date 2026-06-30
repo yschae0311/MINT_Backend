@@ -36,7 +36,9 @@ def _parse_json(text: str) -> dict:
 
 class LLMClient(ABC):
     @abstractmethod
-    def classify_post_content(self, title: str, content: str) -> dict:
+    def classify_post_content(
+        self, title: str, content: str, *, keyword_catalog: str | None = None
+    ) -> dict:
         ...
 
     @abstractmethod
@@ -129,9 +131,13 @@ class GeminiClient(LLMClient):
             raise BadRequestError("Gemini returned empty title translation")
         return translated[:512]
 
-    def classify_post_content(self, title: str, content: str) -> dict:
+    def classify_post_content(
+        self, title: str, content: str, *, keyword_catalog: str | None = None
+    ) -> dict:
         system = _load_prompt("post_classify_v1.md")
         user = f"제목: {title}\n\n본문:\n{content[:12000]}"
+        if keyword_catalog:
+            user = f"{user.rstrip()}\n\n{keyword_catalog.strip()}"
         return self._generate_json_korean(
             self.summary_model,
             system,
@@ -228,7 +234,9 @@ class MockLLMClient(LLMClient):
             return text
         return f"{text} (번역)"
 
-    def classify_post_content(self, title: str, content: str) -> dict:
+    def classify_post_content(
+        self, title: str, content: str, *, keyword_catalog: str | None = None
+    ) -> dict:
         blob = f"{title} {content}".lower()
         category = "커뮤니티/현장" if "커뮤니티" in blob or "reddit" in blob else "충전 인프라"
         if any(h in blob for h in ("정책", "보조금", "규제", "regulation")):

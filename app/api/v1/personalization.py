@@ -46,9 +46,16 @@ from app.core.exceptions import BadRequestError, NotFoundError
 router = APIRouter()
 
 
-def _keyword_read(row, selected: set[UUID]) -> KeywordRead:
+def _keyword_read(
+    row,
+    selected: set[UUID],
+    *,
+    category_name: str | None = None,
+) -> KeywordRead:
     data = KeywordRead.model_validate(row)
     data.selected = row.id in selected
+    if category_name is not None:
+        data.category_name = category_name
     return data
 
 
@@ -92,7 +99,18 @@ def list_keywords(
     service.ensure_defaults(user.organization_id)
     db.commit()
     selected = service.selected_ids(user.id)
-    return [_keyword_read(row, selected) for row in service.list_keywords(user)]
+    category_names = {
+        category.id: category.name
+        for category in service.list_categories(user.organization_id)
+    }
+    return [
+        _keyword_read(
+            row,
+            selected,
+            category_name=category_names.get(row.category_id),
+        )
+        for row in service.list_keywords(user)
+    ]
 
 
 @router.post("/keywords", response_model=KeywordRead, status_code=status.HTTP_201_CREATED)

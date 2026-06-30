@@ -13,6 +13,7 @@ from app.models.enums import (
     AccountApprovalStatus,
     BoardType,
     CreatedBy,
+    KeywordStatus,
     PostStatus,
     ReviewQueueReason,
     ReviewQueueStatus,
@@ -207,6 +208,44 @@ class PersonalizationServiceTest(unittest.TestCase):
         service = ReviewQueueService(self.db)
         self.assertEqual(service.pending_count(self.user.organization_id), 1)
         self.assertEqual(len(service.list(self.user.organization_id, ReviewQueueStatus.pending)), 1)
+
+    def test_classify_creates_selectable_new_keyword(self) -> None:
+        post = self._post()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "기술",
+                "confidence": 0.85,
+                "keywords": [{"name": "무선충전", "confidence": 0.88}],
+            },
+        )
+        self.db.commit()
+        keywords = self.taxonomy.list_keywords(self.user)
+        matched = next((item for item in keywords if item.name == "무선충전"), None)
+        self.assertIsNotNone(matched)
+        assert matched is not None
+        self.assertEqual(matched.status, KeywordStatus.active)
+
+    def test_low_confidence_new_keyword_stays_candidate_but_selectable(self) -> None:
+        post = self._post()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "기술",
+                "confidence": 0.55,
+                "keywords": [{"name": "실험적 키워드", "confidence": 0.45}],
+            },
+        )
+        self.db.commit()
+        keywords = self.taxonomy.list_keywords(self.user)
+        matched = next((item for item in keywords if item.name == "실험적 키워드"), None)
+        self.assertIsNotNone(matched)
+        assert matched is not None
+        self.assertEqual(matched.status, KeywordStatus.candidate)
+        self.taxonomy.set_subscriptions(
+            self.user,
+            [item.id for item in keywords if item.name in {"OCPP", "CSMS", matched.name}],
+        )
 
     def test_classified_post_appears_in_news_feed(self) -> None:
         post = self._post()

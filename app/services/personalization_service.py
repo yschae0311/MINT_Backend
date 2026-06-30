@@ -47,6 +47,7 @@ from app.search.post_search_query import PostSearchFilters, load_posts_ordered, 
 from app.services.llm_client import get_llm_client
 
 KST = ZoneInfo("Asia/Seoul")
+_KEYWORD_AUTO_ACTIVE_MIN = 0.6
 DEFAULT_CATEGORIES = (
     "정책/규제",
     "충전 인프라",
@@ -70,6 +71,14 @@ DEFAULT_KEYWORDS = {
 def normalize_keyword(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "").strip().casefold()
     return re.sub(r"\s+", " ", value)
+
+
+def keyword_status_for_confidence(confidence: float) -> KeywordStatus:
+    return (
+        KeywordStatus.active
+        if confidence >= _KEYWORD_AUTO_ACTIVE_MIN
+        else KeywordStatus.candidate
+    )
 
 
 class TaxonomyService:
@@ -140,16 +149,64 @@ class TaxonomyService:
     def list_keywords(self, user: User) -> list[Keyword]:
         return list(
             self.db.scalars(
-                select(Keyword).where(
+                select(Keyword)
+                .outerjoin(NewsCategory, Keyword.category_id == NewsCategory.id)
+                .where(
                     Keyword.organization_id == user.organization_id,
-                    Keyword.status == KeywordStatus.active,
+                    Keyword.status.in_(
+                        [KeywordStatus.active, KeywordStatus.candidate]
+                    ),
                     or_(
                         Keyword.scope == KeywordScope.organization,
                         Keyword.owner_user_id == user.id,
                     ),
-                ).order_by(Keyword.scope, Keyword.name)
+                )
+                .order_by(
+                    NewsCategory.sort_order.nulls_last(),
+                    NewsCategory.name.nulls_last(),
+                    Keyword.status,
+                    Keyword.name,
+                )
             ).all()
         )
+
+    def keyword_catalog_text(self, organization_id: UUID) -> str:
+        categories = self.list_categories(organization_id)
+        category_names = {category.id: category.name for category in categories}
+        keywords = list(
+            self.db.scalars(
+                select(Keyword).where(
+                    Keyword.organization_id == organization_id,
+                    Keyword.scope == KeywordScope.organization,
+                    Keyword.status.in_(
+                        [KeywordStatus.active, KeywordStatus.candidate]
+                    ),
+                ).order_by(Keyword.name)
+            ).all()
+        )
+        if not keywords:
+            return ""
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for keyword in keywords:
+            category_name = category_names.get(keyword.category_id) or "미분류"
+            grouped[category_name].append(keyword.name)
+        lines = [
+            "## 조직 키워드 참고 (가능하면 아래 용어를 우선 매칭, 없으면 신규 제안)"
+        ]
+        seen: set[str] = set()
+        for category in categories:
+            names = grouped.get(category.name)
+            if not names:
+                continue
+            seen.add(category.name)
+            lines.append(f"- {category.name}: {', '.join(names[:40])}")
+        for category_name in sorted(grouped):
+            if category_name in seen:
+                continue
+            lines.append(
+                f"- {category_name}: {', '.join(grouped[category_name][:40])}"
+            )
+        return "\n".join(lines)
 
     def selected_ids(self, user_id: UUID) -> set[UUID]:
         return set(
@@ -169,7 +226,9 @@ class TaxonomyService:
                 select(Keyword).where(
                     Keyword.id.in_(unique_ids),
                     Keyword.organization_id == user.organization_id,
-                    Keyword.status == KeywordStatus.active,
+                    Keyword.status.in_(
+                        [KeywordStatus.active, KeywordStatus.candidate]
+                    ),
                     or_(
                         Keyword.scope == KeywordScope.organization,
                         Keyword.owner_user_id == user.id,
@@ -423,7 +482,6 @@ class ClassificationService:
         self.db.execute(delete(PostKeyword).where(PostKeyword.post_id == post.id))
         linked_names: list[str] = []
         seen: set[str] = set()
-        created_new_keyword = False
         for name, confidence, matched_keyword in sorted(
             candidates,
             key=lambda item: item[1],
@@ -437,6 +495,7 @@ class ClassificationService:
                 (k for k in organization_keywords if k.normalized_name == normalized), None
             )
             if not keyword:
+                status = keyword_status_for_confidence(confidence)
                 keyword = Keyword(
                     organization_id=post.organization_id,
                     category_id=category.id if category else None,
@@ -444,13 +503,16 @@ class ClassificationService:
                     normalized_name=normalized[:128],
                     aliases=[],
                     scope=KeywordScope.organization,
-                    status=KeywordStatus.candidate,
+                    status=status,
                 )
                 self.db.add(keyword)
                 self.db.flush()
                 all_keywords.append(keyword)
                 organization_keywords.append(keyword)
-                created_new_keyword = True
+                if status == KeywordStatus.candidate:
+                    review_reasons.append(ReviewQueueReason.new_keyword)
+            else:
+                keyword.usage_count = int(keyword.usage_count or 0) + 1
             self.db.add(
                 PostKeyword(
                     post_id=post.id,
@@ -496,7 +558,14 @@ class ClassificationService:
         if len(content_blob) < 20 and len((post.title or "").strip()) < 8:
             return {}
         try:
-            return get_llm_client().classify_post_content(post.title, content_blob or post.title)
+            catalog = TaxonomyService(self.db).keyword_catalog_text(
+                post.organization_id
+            )
+            return get_llm_client().classify_post_content(
+                post.title,
+                content_blob or post.title,
+                keyword_catalog=catalog or None,
+            )
         except Exception:
             review_reasons.append(ReviewQueueReason.extraction_failed)
             return {}
@@ -511,7 +580,14 @@ class ClassificationService:
         ).strip()
         text = content_blob or (post.title or "")
         try:
-            result = get_llm_client().classify_post_content(post.title or "", text)
+            catalog = TaxonomyService(self.db).keyword_catalog_text(
+                post.organization_id
+            )
+            result = get_llm_client().classify_post_content(
+                post.title or "",
+                text,
+                keyword_catalog=catalog or None,
+            )
         except Exception:
             return {"category": post.category, "suggestions": []}
 

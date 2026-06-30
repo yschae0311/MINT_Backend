@@ -27,6 +27,7 @@ class CategoryWrite(BaseModel):
 class KeywordRead(ORMBase):
     id: UUID
     category_id: UUID | None
+    category_name: str | None = None
     owner_user_id: UUID | None
     name: str
     normalized_name: str
