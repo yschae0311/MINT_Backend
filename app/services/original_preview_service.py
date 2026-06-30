@@ -25,8 +25,23 @@ _PREVIEW_CSS = """
 """
 
 
-def _normalize_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    return {k.lower(): v for k, v in headers.items()}
+def _iter_header_pairs(headers: Mapping[str, str]):
+    multi_items = getattr(headers, "multi_items", None)
+    if callable(multi_items):
+        yield from multi_items()
+        return
+    for key, value in headers.items():
+        yield key, value
+
+
+_XFO_BLOCK_VALUES = frozenset({"DENY", "SAMEORIGIN"})
+
+
+def _x_frame_options_value_blocks(value: str) -> bool:
+    normalized = value.strip().upper()
+    if normalized in _XFO_BLOCK_VALUES:
+        return True
+    return any(part.strip().upper() in _XFO_BLOCK_VALUES for part in normalized.split(","))
 
 
 def _csp_blocks_frame_embed(csp: str) -> bool:
@@ -48,16 +63,13 @@ def _csp_blocks_frame_embed(csp: str) -> bool:
 
 def iframe_embed_blocked(headers: Mapping[str, str], html_head: str = "") -> bool:
     """Return True when the page likely blocks cross-origin iframe embed."""
-    lowered = _normalize_headers(headers)
-
-    xfo = lowered.get("x-frame-options", "").strip().upper()
-    if xfo in ("DENY", "SAMEORIGIN"):
-        return True
-
-    for key in ("content-security-policy", "content-security-policy-report-only"):
-        csp = lowered.get(key, "")
-        if csp and _csp_blocks_frame_embed(csp):
+    for key, value in _iter_header_pairs(headers):
+        lowered_key = key.lower()
+        if lowered_key == "x-frame-options" and _x_frame_options_value_blocks(value):
             return True
+        if lowered_key in ("content-security-policy", "content-security-policy-report-only"):
+            if value and _csp_blocks_frame_embed(value):
+                return True
 
     if not html_head:
         return False
@@ -65,8 +77,8 @@ def iframe_embed_blocked(headers: Mapping[str, str], html_head: str = "") -> boo
     soup = BeautifulSoup(html_head, "html.parser")
     for meta in soup.find_all("meta"):
         http_equiv = (meta.get("http-equiv") or "").strip().lower()
-        content = (meta.get("content") or "").strip().upper()
-        if http_equiv == "x-frame-options" and content in ("DENY", "SAMEORIGIN"):
+        content = (meta.get("content") or "").strip()
+        if http_equiv == "x-frame-options" and _x_frame_options_value_blocks(content):
             return True
         if http_equiv == "content-security-policy" and _csp_blocks_frame_embed(content):
             return True

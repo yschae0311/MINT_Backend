@@ -44,6 +44,20 @@ class IframeEmbedBlockedTests(unittest.TestCase):
         }
         self.assertTrue(iframe_embed_blocked(headers))
 
+    def test_x_frame_options_combined_sameorigin_deny(self):
+        headers = {"X-Frame-Options": "SAMEORIGIN, DENY"}
+        self.assertTrue(iframe_embed_blocked(headers))
+
+    def test_clien_like_duplicate_xfo(self):
+        class _Headers:
+            def multi_items(self):
+                return [
+                    ("X-Frame-Options", "SAMEORIGIN"),
+                    ("X-Frame-Options", "DENY"),
+                ]
+
+        self.assertTrue(iframe_embed_blocked(_Headers()))
+
 
 if __name__ == "__main__":
     unittest.main()
