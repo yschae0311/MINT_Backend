@@ -13,6 +13,7 @@ from app.models.enums import (
     AccountApprovalStatus,
     BoardType,
     CreatedBy,
+    KeywordScope,
     KeywordStatus,
     PostStatus,
     ReviewQueueReason,
@@ -21,7 +22,7 @@ from app.models.enums import (
     UserRole,
 )
 from app.models.organization import Organization
-from app.models.personalization import Keyword, ReviewQueueItem
+from app.models.personalization import Keyword, PostKeyword, ReviewQueueItem
 from app.models.post import Post
 from app.models.user import User
 from app.services.llm_client import MockLLMClient
@@ -31,6 +32,7 @@ from app.services.personalization_service import (
     PersonalizedNewsService,
     ReviewQueueService,
     TaxonomyService,
+    find_duplicate_keyword_pairs,
 )
 
 
@@ -220,13 +222,69 @@ class PersonalizationServiceTest(unittest.TestCase):
             },
         )
         self.db.commit()
-        keywords = self.taxonomy.list_keywords(self.user)
+        keywords = self.taxonomy.list_keywords(self.user, include_discovered=True)
         matched = next((item for item in keywords if item.name == "무선충전"), None)
         self.assertIsNotNone(matched)
         assert matched is not None
-        self.assertEqual(matched.status, KeywordStatus.active)
+        self.assertEqual(matched.status, KeywordStatus.candidate)
+        self.assertFalse(matched.is_curated)
 
-    def test_low_confidence_new_keyword_stays_candidate_but_selectable(self) -> None:
+    def test_similar_keyword_is_merged_to_existing(self) -> None:
+        post = self._post()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "CSMS/OCPP",
+                "confidence": 0.85,
+                "keywords": [{"name": "CSMS 플랫폼", "confidence": 0.88}],
+            },
+        )
+        self.db.commit()
+        post_keywords = self.db.scalars(
+            select(Keyword).join(PostKeyword).where(PostKeyword.post_id == post.id)
+        ).all()
+        names = {item.name for item in post_keywords}
+        self.assertIn("CSMS", names)
+        self.assertNotIn("CSMS 플랫폼", names)
+
+    def test_category_subscription_selects_curated_keywords(self) -> None:
+        categories = self.taxonomy.list_categories(self.user.organization_id)
+        csms = next(item for item in categories if item.name == "CSMS/OCPP")
+        self.taxonomy.set_category_subscriptions(self.user, [csms.id])
+        self.db.commit()
+        selected = self.taxonomy.selected_ids(self.user.id)
+        keyword_names = {
+            row.name
+            for row in self.taxonomy.list_keywords(self.user, include_discovered=True)
+            if row.id in selected
+        }
+        self.assertTrue({"OCPP", "CSMS"}.issubset(keyword_names))
+        self.assertTrue(self.taxonomy.is_personalization_ready(self.user))
+
+    def test_find_duplicate_keyword_pairs_merges_similar_names(self) -> None:
+        keywords = self.taxonomy.list_keywords(self.user, include_discovered=True)
+        csms = next(item for item in keywords if item.name == "CSMS")
+        extra = Keyword(
+            organization_id=self.user.organization_id,
+            category_id=csms.category_id,
+            name="CSMS 플랫폼",
+            normalized_name="csms 플랫폼",
+            aliases=[],
+            scope=KeywordScope.organization,
+            status=KeywordStatus.candidate,
+            is_curated=False,
+        )
+        self.db.add(extra)
+        self.db.commit()
+        pairs = find_duplicate_keyword_pairs(
+            self.taxonomy.list_keywords(self.user, include_discovered=True)
+        )
+        self.assertEqual(len(pairs), 1)
+        source, target = pairs[0]
+        self.assertEqual(source.name, "CSMS 플랫폼")
+        self.assertEqual(target.name, "CSMS")
+
+    def test_low_confidence_new_keyword_is_not_created(self) -> None:
         post = self._post()
         ClassificationService(self.db).classify_post(
             post,
@@ -237,15 +295,28 @@ class PersonalizationServiceTest(unittest.TestCase):
             },
         )
         self.db.commit()
-        keywords = self.taxonomy.list_keywords(self.user)
+        keywords = self.taxonomy.list_keywords(self.user, include_discovered=True)
         matched = next((item for item in keywords if item.name == "실험적 키워드"), None)
-        self.assertIsNotNone(matched)
-        assert matched is not None
-        self.assertEqual(matched.status, KeywordStatus.candidate)
-        self.taxonomy.set_subscriptions(
-            self.user,
-            [item.id for item in keywords if item.name in {"OCPP", "CSMS", matched.name}],
+        self.assertIsNone(matched)
+
+    def test_discovered_keywords_hidden_from_default_list(self) -> None:
+        post = self._post()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "기술",
+                "confidence": 0.85,
+                "keywords": [{"name": "신규 발견 키워드", "confidence": 0.82}],
+            },
         )
+        self.db.commit()
+        default_names = {item.name for item in self.taxonomy.list_keywords(self.user)}
+        all_names = {
+            item.name
+            for item in self.taxonomy.list_keywords(self.user, include_discovered=True)
+        }
+        self.assertNotIn("신규 발견 키워드", default_names)
+        self.assertIn("신규 발견 키워드", all_names)
 
     def test_classified_post_appears_in_news_feed(self) -> None:
         post = self._post()

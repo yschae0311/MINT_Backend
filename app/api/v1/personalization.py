@@ -13,6 +13,7 @@ from app.models.user import User
 from app.schemas.job import JobRead
 from app.schemas.personalization import (
     CategoryRead,
+    CategorySubscriptionUpdate,
     CategoryWrite,
     KeywordCreate,
     KeywordRead,
@@ -46,6 +47,12 @@ from app.core.exceptions import BadRequestError, NotFoundError
 router = APIRouter()
 
 
+def _category_read(row, selected: set[UUID]) -> CategoryRead:
+    data = CategoryRead.model_validate(row)
+    data.selected = row.id in selected
+    return data
+
+
 def _keyword_read(
     row,
     selected: set[UUID],
@@ -67,7 +74,11 @@ def list_categories(
     service = TaxonomyService(db)
     service.ensure_defaults(user.organization_id)
     db.commit()
-    return service.list_categories(user.organization_id)
+    selected = service.selected_category_ids(user.id)
+    return [
+        _category_read(row, selected)
+        for row in service.list_categories(user.organization_id)
+    ]
 
 
 @router.post("/categories", response_model=CategoryRead, status_code=status.HTTP_201_CREATED)
@@ -94,6 +105,7 @@ def create_category(
 def list_keywords(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    include_discovered: bool = Query(default=False),
 ):
     service = TaxonomyService(db)
     service.ensure_defaults(user.organization_id)
@@ -109,7 +121,7 @@ def list_keywords(
             selected,
             category_name=category_names.get(row.category_id),
         )
-        for row in service.list_keywords(user)
+        for row in service.list_keywords(user, include_discovered=include_discovered)
     ]
 
 
@@ -179,47 +191,26 @@ def merge_keyword(
         or target.id == source.id
     ):
         raise NotFoundError("Keyword not found")
-    post_ids = db.scalars(
-        select(PostKeyword.post_id).where(PostKeyword.keyword_id == source.id)
-    ).all()
-    for post_id in post_ids:
-        exists = db.scalar(
-            select(PostKeyword).where(
-                PostKeyword.post_id == post_id,
-                PostKeyword.keyword_id == target.id,
-            )
-        )
-        if not exists:
-            db.add(
-                PostKeyword(
-                    post_id=post_id,
-                    keyword_id=target.id,
-                    confidence=1.0,
-                    matched_by=KeywordMatchMethod.admin,
-                )
-            )
-    user_ids = db.scalars(
-        select(UserKeywordSubscription.user_id).where(
-            UserKeywordSubscription.keyword_id == source.id
-        )
-    ).all()
-    for user_id in user_ids:
-        exists = db.scalar(
-            select(UserKeywordSubscription).where(
-                UserKeywordSubscription.user_id == user_id,
-                UserKeywordSubscription.keyword_id == target.id,
-            )
-        )
-        if not exists:
-            db.add(UserKeywordSubscription(user_id=user_id, keyword_id=target.id))
-    db.query(PostKeyword).filter(PostKeyword.keyword_id == source.id).delete()
-    db.query(UserKeywordSubscription).filter(
-        UserKeywordSubscription.keyword_id == source.id
-    ).delete()
-    source.status = KeywordStatus.archived
-    target.aliases = list(dict.fromkeys([*(target.aliases or []), source.name, *(source.aliases or [])]))
+    TaxonomyService(db).merge_keywords(
+        source,
+        target,
+        organization_id=user.organization_id,
+    )
     db.commit()
     return _keyword_read(target, TaxonomyService(db).selected_ids(user.id))
+
+
+@router.put("/users/me/categories", response_model=list[CategoryRead])
+def update_my_categories(
+    data: CategorySubscriptionUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    categories, _ = TaxonomyService(db).set_category_subscriptions(
+        user, data.category_ids
+    )
+    selected = {row.id for row in categories}
+    return [_category_read(row, selected) for row in categories]
 
 
 @router.get("/users/me/keywords", response_model=list[KeywordRead])
@@ -324,9 +315,11 @@ def generate_personal_report(
     from app.services.job_service import JobService, dispatch_task
     from app.workers.tasks import generate_personal_report_job_task
 
-    selected = TaxonomyService(db).selected_ids(user.id)
-    if len(selected) < 3:
-        raise BadRequestError("관심 키워드를 3개 이상 선택해야 개인 리포트를 생성할 수 있습니다.")
+    taxonomy = TaxonomyService(db)
+    if not taxonomy.is_personalization_ready(user):
+        raise BadRequestError(
+            "관심 분야 1개 이상 또는 관심 키워드 3개 이상 선택 후 개인 리포트를 생성할 수 있습니다."
+        )
 
     label = (
         f"개인 리포트 생성 · {data.report_date}"

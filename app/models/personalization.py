@@ -71,6 +71,7 @@ class Keyword(Base):
         str_enum(KeywordStatus, "keyword_status"), default=KeywordStatus.active
     )
     usage_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_curated: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -87,6 +88,20 @@ class UserKeywordSubscription(Base):
     )
     keyword_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("keywords.id"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserCategorySubscription(Base):
+    __tablename__ = "user_category_subscriptions"
+    __table_args__ = (UniqueConstraint("user_id", "category_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("news_categories.id"), nullable=False, index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

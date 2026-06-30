@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.exceptions import BadRequestError, NotFoundError
@@ -30,6 +30,7 @@ from app.models.personalization import (
     PersonalReportView,
     PostKeyword,
     ReviewQueueItem,
+    UserCategorySubscription,
     UserKeywordSubscription,
 )
 from app.models.post import Post
@@ -48,6 +49,8 @@ from app.services.llm_client import get_llm_client
 
 KST = ZoneInfo("Asia/Seoul")
 _KEYWORD_AUTO_ACTIVE_MIN = 0.6
+_MIN_NEW_KEYWORD_CONFIDENCE = 0.72
+_MAX_KEYWORDS_PER_POST = 3
 DEFAULT_CATEGORIES = (
     "정책/규제",
     "충전 인프라",
@@ -81,6 +84,117 @@ def keyword_status_for_confidence(confidence: float) -> KeywordStatus:
     )
 
 
+def _keyword_terms(keyword: Keyword) -> set[str]:
+    terms = {keyword.normalized_name}
+    for alias in keyword.aliases or []:
+        normalized = normalize_keyword(alias)
+        if normalized:
+            terms.add(normalized)
+    return terms
+
+
+def resolve_existing_keyword(
+    name: str,
+    organization_keywords: list[Keyword],
+    *,
+    category_id: UUID | None = None,
+) -> Keyword | None:
+    normalized = normalize_keyword(name)
+    if not normalized:
+        return None
+
+    for keyword in organization_keywords:
+        if normalized in _keyword_terms(keyword):
+            return keyword
+
+    substring_matches: list[tuple[Keyword, int, bool]] = []
+    for keyword in organization_keywords:
+        if category_id and keyword.category_id != category_id:
+            continue
+        for term in _keyword_terms(keyword):
+            if len(term) < 3:
+                continue
+            if term in normalized or normalized in term:
+                substring_matches.append((keyword, len(term), keyword.is_curated))
+    if substring_matches:
+        substring_matches.sort(key=lambda item: (not item[2], -item[1]))
+        return substring_matches[0][0]
+
+    for keyword in organization_keywords:
+        if not keyword.is_curated:
+            continue
+        for term in _keyword_terms(keyword):
+            if len(term) < 4:
+                continue
+            if term in normalized or normalized in term:
+                return keyword
+
+    name_tokens = set(normalized.split())
+    best: Keyword | None = None
+    best_score = 0.0
+    for keyword in organization_keywords:
+        for term in _keyword_terms(keyword):
+            term_tokens = set(term.split())
+            if not term_tokens or not name_tokens:
+                continue
+            overlap = len(name_tokens & term_tokens) / max(len(name_tokens), len(term_tokens))
+            if overlap >= 0.6 and overlap > best_score:
+                best_score = overlap
+                best = keyword
+    return best
+
+
+def add_keyword_alias(keyword: Keyword, alias: str) -> None:
+    normalized = normalize_keyword(alias)
+    if not normalized or normalized == keyword.normalized_name:
+        return
+    aliases = list(keyword.aliases or [])
+    existing = {normalize_keyword(item) for item in aliases}
+    if normalized in existing:
+        return
+    aliases.append(alias.strip()[:128])
+    keyword.aliases = aliases[:20]
+
+
+def keyword_merge_priority(keyword: Keyword) -> tuple[int, int, int, float]:
+    created = keyword.created_at.timestamp() if keyword.created_at else 0.0
+    return (
+        1 if keyword.is_curated else 0,
+        1 if keyword.status == KeywordStatus.active else 0,
+        int(keyword.usage_count or 0),
+        created,
+    )
+
+
+def find_duplicate_keyword_pairs(keywords: list[Keyword]) -> list[tuple[Keyword, Keyword]]:
+    """Return (source, target) pairs where source should merge into target."""
+    active = [
+        keyword
+        for keyword in keywords
+        if keyword.scope == KeywordScope.organization
+        and keyword.owner_user_id is None
+        and keyword.status != KeywordStatus.archived
+    ]
+    consumed: set[UUID] = set()
+    pairs: list[tuple[Keyword, Keyword]] = []
+    for source in sorted(active, key=keyword_merge_priority):
+        if source.id in consumed:
+            continue
+        pool = [keyword for keyword in active if keyword.id not in consumed and keyword.id != source.id]
+        target = resolve_existing_keyword(
+            source.name,
+            pool,
+            category_id=source.category_id,
+        )
+        if not target or target.id == source.id:
+            continue
+        if keyword_merge_priority(target) < keyword_merge_priority(source):
+            source, target = target, source
+        pairs.append((source, target))
+        consumed.add(source.id)
+    return pairs
+
+
 class TaxonomyService:
     def __init__(self, db: Session):
         self.db = db
@@ -106,7 +220,7 @@ class TaxonomyService:
                 categories[normalized] = row
 
         existing = {
-            row.normalized_name
+            row.normalized_name: row
             for row in self.db.scalars(
                 select(Keyword).where(
                     Keyword.organization_id == organization_id,
@@ -118,20 +232,26 @@ class TaxonomyService:
             category = categories[normalize_keyword(category_name)]
             for name in names:
                 normalized = normalize_keyword(name)
-                if normalized in existing:
+                row = existing.get(normalized)
+                if row:
+                    if not row.is_curated:
+                        row.is_curated = True
+                    if not row.category_id:
+                        row.category_id = category.id
                     continue
-                self.db.add(
-                    Keyword(
-                        organization_id=organization_id,
-                        category_id=category.id,
-                        name=name,
-                        normalized_name=normalized,
-                        aliases=[],
-                        scope=KeywordScope.organization,
-                        status=KeywordStatus.active,
-                    )
+                new_row = Keyword(
+                    organization_id=organization_id,
+                    category_id=category.id,
+                    name=name,
+                    normalized_name=normalized,
+                    aliases=[],
+                    scope=KeywordScope.organization,
+                    status=KeywordStatus.active,
+                    is_curated=True,
                 )
-                existing.add(normalized)
+                self.db.add(new_row)
+                self.db.flush()
+                existing[normalized] = new_row
         self.db.flush()
 
     def list_categories(self, organization_id: UUID) -> list[NewsCategory]:
@@ -146,8 +266,13 @@ class TaxonomyService:
             ).all()
         )
 
-    def list_keywords(self, user: User) -> list[Keyword]:
-        return list(
+    def list_keywords(
+        self,
+        user: User,
+        *,
+        include_discovered: bool = False,
+    ) -> list[Keyword]:
+        rows = list(
             self.db.scalars(
                 select(Keyword)
                 .outerjoin(NewsCategory, Keyword.category_id == NewsCategory.id)
@@ -164,11 +289,20 @@ class TaxonomyService:
                 .order_by(
                     NewsCategory.sort_order.nulls_last(),
                     NewsCategory.name.nulls_last(),
+                    Keyword.is_curated.desc(),
                     Keyword.status,
                     Keyword.name,
                 )
             ).all()
         )
+        if include_discovered:
+            return rows
+        selected = self.selected_ids(user.id)
+        return [
+            row
+            for row in rows
+            if row.is_curated or row.owner_user_id == user.id or row.id in selected
+        ]
 
     def keyword_catalog_text(self, organization_id: UUID) -> str:
         categories = self.list_categories(organization_id)
@@ -217,10 +351,121 @@ class TaxonomyService:
             ).all()
         )
 
-    def set_subscriptions(self, user: User, keyword_ids: list[UUID]) -> list[Keyword]:
+    def selected_category_ids(self, user_id: UUID) -> set[UUID]:
+        return set(
+            self.db.scalars(
+                select(UserCategorySubscription.category_id).where(
+                    UserCategorySubscription.user_id == user_id
+                )
+            ).all()
+        )
+
+    def selected_category_names(self, user_id: UUID, organization_id: UUID) -> list[str]:
+        category_ids = self.selected_category_ids(user_id)
+        if not category_ids:
+            return []
+        return list(
+            self.db.scalars(
+                select(NewsCategory.name).where(
+                    NewsCategory.organization_id == organization_id,
+                    NewsCategory.id.in_(category_ids),
+                )
+            ).all()
+        )
+
+    def list_categories_for_user(self, user: User) -> list[tuple[NewsCategory, bool]]:
+        selected = self.selected_category_ids(user.id)
+        rows = self.list_categories(user.organization_id)
+        return [(row, row.id in selected) for row in rows]
+
+    def is_personalization_ready(self, user: User) -> bool:
+        if self.selected_category_ids(user.id):
+            return True
+        return len(self.selected_ids(user.id)) >= 3
+
+    def curated_keyword_ids_for_categories(
+        self, organization_id: UUID, category_ids: list[UUID]
+    ) -> list[UUID]:
+        if not category_ids:
+            return []
+        return list(
+            self.db.scalars(
+                select(Keyword.id).where(
+                    Keyword.organization_id == organization_id,
+                    Keyword.category_id.in_(category_ids),
+                    Keyword.is_curated.is_(True),
+                    Keyword.status.in_(
+                        [KeywordStatus.active, KeywordStatus.candidate]
+                    ),
+                    Keyword.scope == KeywordScope.organization,
+                )
+            ).all()
+        )
+
+    def set_category_subscriptions(
+        self, user: User, category_ids: list[UUID]
+    ) -> tuple[list[NewsCategory], list[Keyword]]:
+        unique_ids = list(dict.fromkeys(category_ids))
+        if len(unique_ids) < 1:
+            raise BadRequestError("관심 분야를 최소 1개 선택해야 합니다.")
+        allowed = list(
+            self.db.scalars(
+                select(NewsCategory).where(
+                    NewsCategory.id.in_(unique_ids),
+                    NewsCategory.organization_id == user.organization_id,
+                    NewsCategory.is_active.is_(True),
+                )
+            ).all()
+        )
+        if len(allowed) != len(unique_ids):
+            raise BadRequestError("선택할 수 없는 분야가 포함되어 있습니다.")
+        self.db.execute(
+            delete(UserCategorySubscription).where(
+                UserCategorySubscription.user_id == user.id
+            )
+        )
+        for category in allowed:
+            self.db.add(
+                UserCategorySubscription(user_id=user.id, category_id=category.id)
+            )
+        curated_ids = self.curated_keyword_ids_for_categories(
+            user.organization_id, unique_ids
+        )
+        personal_ids = list(
+            self.db.scalars(
+                select(UserKeywordSubscription.keyword_id)
+                .join(Keyword, Keyword.id == UserKeywordSubscription.keyword_id)
+                .where(
+                    UserKeywordSubscription.user_id == user.id,
+                    Keyword.owner_user_id == user.id,
+                )
+            ).all()
+        )
+        keyword_ids = list(dict.fromkeys([*curated_ids, *personal_ids]))
+        if not keyword_ids:
+            raise BadRequestError("선택한 분야에 사용할 수 있는 키워드가 없습니다.")
+        keywords = self.set_subscriptions(
+            user,
+            keyword_ids,
+            minimum=1,
+            replace_existing=True,
+        )
+        self.db.commit()
+        return allowed, keywords
+
+    def set_subscriptions(
+        self,
+        user: User,
+        keyword_ids: list[UUID],
+        *,
+        minimum: int = 3,
+        replace_existing: bool = True,
+    ) -> list[Keyword]:
         unique_ids = list(dict.fromkeys(keyword_ids))
-        if len(unique_ids) < 3:
-            raise BadRequestError("관심 키워드는 최소 3개를 선택해야 합니다.")
+        if len(unique_ids) < minimum:
+            raise BadRequestError(
+                f"관심 키워드는 최소 {minimum}개를 선택해야 합니다."
+            )
         allowed = list(
             self.db.scalars(
                 select(Keyword).where(
@@ -238,12 +483,17 @@ class TaxonomyService:
         )
         if len(allowed) != len(unique_ids):
             raise BadRequestError("선택할 수 없는 키워드가 포함되어 있습니다.")
-        self.db.execute(
-            delete(UserKeywordSubscription).where(
-                UserKeywordSubscription.user_id == user.id
+        if replace_existing:
+            self.db.execute(
+                delete(UserKeywordSubscription).where(
+                    UserKeywordSubscription.user_id == user.id
+                )
             )
-        )
-        for keyword in allowed:
+            target_keywords = allowed
+        else:
+            existing_ids = self.selected_ids(user.id)
+            target_keywords = [row for row in allowed if row.id not in existing_ids]
+        for keyword in target_keywords:
             self.db.add(UserKeywordSubscription(user_id=user.id, keyword_id=keyword.id))
         self.db.commit()
         return allowed
@@ -343,6 +593,7 @@ class TaxonomyService:
             aliases=[a.strip() for a in aliases or [] if a.strip()],
             scope=KeywordScope.organization,
             status=status,
+            is_curated=True,
         )
         self.db.add(row)
         self.db.commit()
@@ -416,6 +667,98 @@ class TaxonomyService:
         self.db.commit()
         self.db.refresh(row)
         return row
+
+    def merge_keywords(
+        self,
+        source: Keyword,
+        target: Keyword,
+        *,
+        organization_id: UUID,
+    ) -> Keyword:
+        if (
+            not source
+            or not target
+            or source.id == target.id
+            or source.organization_id != organization_id
+            or target.organization_id != organization_id
+        ):
+            raise NotFoundError("Keyword not found")
+        post_ids = self.db.scalars(
+            select(PostKeyword.post_id).where(PostKeyword.keyword_id == source.id)
+        ).all()
+        for post_id in post_ids:
+            exists = self.db.scalar(
+                select(PostKeyword).where(
+                    PostKeyword.post_id == post_id,
+                    PostKeyword.keyword_id == target.id,
+                )
+            )
+            if not exists:
+                link = self.db.scalar(
+                    select(PostKeyword).where(
+                        PostKeyword.post_id == post_id,
+                        PostKeyword.keyword_id == source.id,
+                    )
+                )
+                self.db.add(
+                    PostKeyword(
+                        post_id=post_id,
+                        keyword_id=target.id,
+                        confidence=link.confidence if link else 1.0,
+                        matched_by=KeywordMatchMethod.admin,
+                    )
+                )
+            post = self.db.get(Post, post_id)
+            if post and post.keywords:
+                items = list(post.keywords.get("items") or [])
+                rewritten: list[str] = []
+                changed = False
+                for item in items:
+                    label = target.name if item == source.name else item
+                    if label not in rewritten:
+                        rewritten.append(label)
+                    if item == source.name:
+                        changed = True
+                if changed:
+                    post.keywords = {**post.keywords, "items": rewritten}
+        user_ids = self.db.scalars(
+            select(UserKeywordSubscription.user_id).where(
+                UserKeywordSubscription.keyword_id == source.id
+            )
+        ).all()
+        for user_id in user_ids:
+            exists = self.db.scalar(
+                select(UserKeywordSubscription).where(
+                    UserKeywordSubscription.user_id == user_id,
+                    UserKeywordSubscription.keyword_id == target.id,
+                )
+            )
+            if not exists:
+                self.db.add(
+                    UserKeywordSubscription(user_id=user_id, keyword_id=target.id)
+                )
+        self.db.execute(delete(PostKeyword).where(PostKeyword.keyword_id == source.id))
+        self.db.execute(
+            delete(UserKeywordSubscription).where(
+                UserKeywordSubscription.keyword_id == source.id
+            )
+        )
+        source.status = KeywordStatus.archived
+        target.usage_count = int(target.usage_count or 0) + int(source.usage_count or 0)
+        target.aliases = list(
+            dict.fromkeys(
+                [
+                    *(target.aliases or []),
+                    source.name,
+                    *(source.aliases or []),
+                ]
+            )
+        )[:20]
+        if not target.is_curated and source.is_curated:
+            target.is_curated = True
+        add_keyword_alias(target, source.name)
+        self.db.flush()
+        return target
 
 
 class ClassificationService:
@@ -491,11 +834,14 @@ class ClassificationService:
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
-            keyword = matched_keyword or next(
-                (k for k in organization_keywords if k.normalized_name == normalized), None
+            keyword = matched_keyword or resolve_existing_keyword(
+                name,
+                organization_keywords,
+                category_id=category.id if category else None,
             )
             if not keyword:
-                status = keyword_status_for_confidence(confidence)
+                if confidence < _MIN_NEW_KEYWORD_CONFIDENCE:
+                    continue
                 keyword = Keyword(
                     organization_id=post.organization_id,
                     category_id=category.id if category else None,
@@ -503,15 +849,17 @@ class ClassificationService:
                     normalized_name=normalized[:128],
                     aliases=[],
                     scope=KeywordScope.organization,
-                    status=status,
+                    status=KeywordStatus.candidate,
+                    is_curated=False,
                 )
                 self.db.add(keyword)
                 self.db.flush()
                 all_keywords.append(keyword)
                 organization_keywords.append(keyword)
-                if status == KeywordStatus.candidate:
-                    review_reasons.append(ReviewQueueReason.new_keyword)
+                review_reasons.append(ReviewQueueReason.new_keyword)
             else:
+                if normalize_keyword(name) != keyword.normalized_name:
+                    add_keyword_alias(keyword, name)
                 keyword.usage_count = int(keyword.usage_count or 0) + 1
             self.db.add(
                 PostKeyword(
@@ -522,7 +870,7 @@ class ClassificationService:
                 )
             )
             linked_names.append(keyword.name)
-            if len(linked_names) >= 5:
+            if len(linked_names) >= _MAX_KEYWORDS_PER_POST:
                 break
 
         confidence = float(merged.get("confidence") or self._latest_confidence(post) or 0)
@@ -785,9 +1133,15 @@ class PersonalizedNewsService:
         size: int = 20,
     ) -> NewsPage:
         selected = set(keyword_ids or [])
+        taxonomy = TaxonomyService(self.db)
         if personalized and not selected:
-            selected = TaxonomyService(self.db).selected_ids(user.id)
-        if personalized and not selected:
+            selected = taxonomy.selected_ids(user.id)
+        selected_category_names = (
+            taxonomy.selected_category_names(user.id, user.organization_id)
+            if personalized
+            else []
+        )
+        if personalized and not selected and not selected_category_names:
             return NewsPage(items=[], total=0, page=page, size=size, pages=1)
 
         if get_settings().search_uses_elasticsearch and (query or "").strip():
@@ -814,10 +1168,22 @@ class PersonalizedNewsService:
                 Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
             )
         )
-        if selected:
+        if personalized and selected and selected_category_names:
+            q = q.where(
+                or_(
+                    exists().where(
+                        PostKeyword.post_id == Post.id,
+                        PostKeyword.keyword_id.in_(selected),
+                    ),
+                    Post.category.in_(selected_category_names),
+                )
+            )
+        elif selected:
             q = q.join(PostKeyword, PostKeyword.post_id == Post.id).where(
                 PostKeyword.keyword_id.in_(selected)
             )
+        elif selected_category_names:
+            q = q.where(Post.category.in_(selected_category_names))
         if category:
             q = q.where(Post.category == category)
         if importance:
@@ -1034,7 +1400,7 @@ class PersonalReportService:
     def generate_for_user(self, user: User, target: date | None = None) -> PersonalReport | None:
         target = target or datetime.now(KST).date()
         selected = TaxonomyService(self.db).selected_ids(user.id)
-        if len(selected) < 3:
+        if not TaxonomyService(self.db).is_personalization_ready(user):
             return None
         page = self.news.list_news(
             user,

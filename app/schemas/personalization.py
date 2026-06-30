@@ -17,6 +17,11 @@ class CategoryRead(ORMBase):
     id: UUID
     name: str
     sort_order: int
+    selected: bool = False
+
+
+class CategorySubscriptionUpdate(BaseModel):
+    category_ids: list[UUID] = Field(min_length=1, max_length=8)
 
 
 class CategoryWrite(BaseModel):
@@ -35,6 +40,7 @@ class KeywordRead(ORMBase):
     scope: KeywordScope
     status: KeywordStatus
     usage_count: int
+    is_curated: bool = False
     selected: bool = False
 
 
@@ -56,7 +62,7 @@ class KeywordMergeRequest(BaseModel):
 
 
 class KeywordSubscriptionUpdate(BaseModel):
-    keyword_ids: list[UUID] = Field(min_length=3, max_length=30)
+    keyword_ids: list[UUID] = Field(min_length=1, max_length=30)
 
 
 class MatchedKeyword(BaseModel):
