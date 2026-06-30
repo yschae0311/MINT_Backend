@@ -69,14 +69,16 @@ DEFAULT_KEYWORDS = {
     "시장/기업": ("충전 사업자", "완성차", "시장 동향"),
     "기술": ("충전 기술", "로밍", "결제"),
 }
-_FEATURED_CATEGORY_NAMES = frozenset(normalize_keyword(name) for name in DEFAULT_KEYWORDS)
-_DEFAULT_CATEGORY_NORMALIZED = frozenset(normalize_keyword(name) for name in DEFAULT_CATEGORIES)
 _DISCOVERED_CATEGORY_SORT_BASE = 1000
 
 
 def normalize_keyword(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "").strip().casefold()
     return re.sub(r"\s+", " ", value)
+
+
+_FEATURED_CATEGORY_NAMES = frozenset(normalize_keyword(name) for name in DEFAULT_KEYWORDS)
+_DEFAULT_CATEGORY_NORMALIZED = frozenset(normalize_keyword(name) for name in DEFAULT_CATEGORIES)
 
 
 def keyword_status_for_confidence(confidence: float) -> KeywordStatus:
