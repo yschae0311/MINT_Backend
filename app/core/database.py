@@ -73,6 +73,37 @@ def _migrate_pg_columns() -> None:
                 "ADD COLUMN IF NOT EXISTS approval_status VARCHAR(16) DEFAULT 'approved'"
             )
         )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".keywords '
+                "ADD COLUMN IF NOT EXISTS is_curated BOOLEAN NOT NULL DEFAULT false"
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{_schema}".user_category_subscriptions (
+                    id UUID PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES "{_schema}".users(id),
+                    category_id UUID NOT NULL REFERENCES "{_schema}".news_categories(id),
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (user_id, category_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_user_category_subscriptions_user_id '
+                f'ON "{_schema}".user_category_subscriptions (user_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_user_category_subscriptions_category_id '
+                f'ON "{_schema}".user_category_subscriptions (category_id)'
+            )
+        )
     logger.debug('Ensured background_jobs.status column width')
 
 

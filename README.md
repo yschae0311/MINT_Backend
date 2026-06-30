@@ -42,7 +42,7 @@ Use `docker compose` from repo root, then set in `.env`:
 DATABASE_URL=postgresql+psycopg://mint_user:mint_password@localhost:5432/mint_db
 ```
 
-The DB user must be allowed to `CREATE TABLE` on schema `public`. If `alembic upgrade head` fails with `permission denied for schema public`, grant privileges or use `create_all` via app startup instead.
+The DB user must be allowed to `CREATE TABLE` on schema `public`. If `alembic upgrade head` fails with `permission denied for schema public`, set `DB_SCHEMA=mint` in `.env` (managed PostgreSQL) and use the updated `alembic/env.py`, or apply `scripts/sql/008_category_subscriptions.sql` manually.
 
 ## AWS / EC2 (production)
 

@@ -12,6 +12,7 @@ from app.models.personalization import (
     PersonalReportView,
     PostKeyword,
     ReviewQueueItem,
+    UserCategorySubscription,
     UserKeywordSubscription,
 )
 from app.models.search_index_queue import SearchIndexQueue
@@ -36,6 +37,7 @@ __all__ = [
     "NewsCategory",
     "Keyword",
     "UserKeywordSubscription",
+    "UserCategorySubscription",
     "PostKeyword",
     "PersonalReport",
     "PersonalReportItem",
