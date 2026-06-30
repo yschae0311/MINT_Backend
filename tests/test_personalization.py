@@ -261,6 +261,31 @@ class PersonalizationServiceTest(unittest.TestCase):
         self.assertTrue({"OCPP", "CSMS"}.issubset(keyword_names))
         self.assertTrue(self.taxonomy.is_personalization_ready(self.user))
 
+    def test_sync_discovered_categories_imports_post_labels(self) -> None:
+        post = self._post()
+        post.category = "인공지능"
+        self.db.commit()
+        created = self.taxonomy.sync_discovered_categories(self.user.organization_id)
+        self.db.commit()
+        self.assertGreaterEqual(created, 1)
+        names = {row.name for row in self.taxonomy.list_categories(self.user.organization_id)}
+        self.assertIn("인공지능", names)
+
+    def test_classify_creates_new_category(self) -> None:
+        post = self._post()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "반도체",
+                "confidence": 0.9,
+                "keywords": [{"name": "파운드리", "confidence": 0.85}],
+            },
+        )
+        self.db.commit()
+        self.assertEqual(post.category, "반도체")
+        names = {row.name for row in self.taxonomy.list_categories(self.user.organization_id)}
+        self.assertIn("반도체", names)
+
     def test_find_duplicate_keyword_pairs_merges_similar_names(self) -> None:
         keywords = self.taxonomy.list_keywords(self.user, include_discovered=True)
         csms = next(item for item in keywords if item.name == "CSMS")

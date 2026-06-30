@@ -69,6 +69,9 @@ DEFAULT_KEYWORDS = {
     "시장/기업": ("충전 사업자", "완성차", "시장 동향"),
     "기술": ("충전 기술", "로밍", "결제"),
 }
+_FEATURED_CATEGORY_NAMES = frozenset(normalize_keyword(name) for name in DEFAULT_KEYWORDS)
+_DEFAULT_CATEGORY_NORMALIZED = frozenset(normalize_keyword(name) for name in DEFAULT_CATEGORIES)
+_DISCOVERED_CATEGORY_SORT_BASE = 1000
 
 
 def normalize_keyword(value: str) -> str:
@@ -214,10 +217,13 @@ class TaxonomyService:
                     name=name,
                     normalized_name=normalized,
                     sort_order=order,
+                    is_featured=normalized in _FEATURED_CATEGORY_NAMES,
                 )
                 self.db.add(row)
                 self.db.flush()
                 categories[normalized] = row
+            elif normalized in _FEATURED_CATEGORY_NAMES and not categories[normalized].is_featured:
+                categories[normalized].is_featured = True
 
         existing = {
             row.normalized_name: row
@@ -262,9 +268,174 @@ class TaxonomyService:
                     NewsCategory.organization_id == organization_id,
                     NewsCategory.is_active.is_(True),
                 )
+                .order_by(
+                    NewsCategory.is_featured.desc(),
+                    NewsCategory.sort_order,
+                    NewsCategory.name,
+                )
+            ).all()
+        )
+
+    def sync_discovered_categories(self, organization_id: UUID) -> int:
+        """Import distinct post.category values into news_categories."""
+        names = list(
+            self.db.scalars(
+                select(Post.category)
+                .where(
+                    Post.organization_id == organization_id,
+                    Post.category.is_not(None),
+                    Post.category != "",
+                    Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+                )
+                .distinct()
+            ).all()
+        )
+        existing = {
+            row.normalized_name: row
+            for row in self.db.scalars(
+                select(NewsCategory).where(NewsCategory.organization_id == organization_id)
+            ).all()
+        }
+        max_order = max(
+            (row.sort_order for row in existing.values()),
+            default=len(DEFAULT_CATEGORIES),
+        )
+        created = 0
+        for name in names:
+            label = (name or "").strip()
+            if not label:
+                continue
+            normalized = normalize_keyword(label)
+            if normalized in existing:
+                continue
+            max_order += 1
+            row = NewsCategory(
+                organization_id=organization_id,
+                name=label[:128],
+                normalized_name=normalized[:128],
+                sort_order=max_order,
+                is_featured=False,
+            )
+            self.db.add(row)
+            self.db.flush()
+            existing[normalized] = row
+            created += 1
+        if created:
+            self.db.flush()
+        return created
+
+    def get_or_create_category(
+        self, organization_id: UUID, category_name: str
+    ) -> NewsCategory:
+        label = (category_name or "기타").strip() or "기타"
+        normalized = normalize_keyword(label)
+        row = self.db.scalar(
+            select(NewsCategory).where(
+                NewsCategory.organization_id == organization_id,
+                NewsCategory.normalized_name == normalized,
+            )
+        )
+        if row:
+            return row
+        max_order = self.db.scalar(
+            select(func.max(NewsCategory.sort_order)).where(
+                NewsCategory.organization_id == organization_id
+            )
+        )
+        row = NewsCategory(
+            organization_id=organization_id,
+            name=label[:128],
+            normalized_name=normalized[:128],
+            sort_order=int(max_order or _DISCOVERED_CATEGORY_SORT_BASE) + 1,
+            is_featured=False,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def post_counts_by_category(self, organization_id: UUID) -> dict[UUID, int]:
+        categories = {
+            row.normalized_name: row.id
+            for row in self.db.scalars(
+                select(NewsCategory).where(NewsCategory.organization_id == organization_id)
+            ).all()
+        }
+        rows = self.db.execute(
+            select(Post.category, func.count())
+            .where(
+                Post.organization_id == organization_id,
+                Post.category.is_not(None),
+                Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+            )
+            .group_by(Post.category)
+        ).all()
+        counts: dict[UUID, int] = {}
+        for name, count in rows:
+            category_id = categories.get(normalize_keyword(name or ""))
+            if category_id:
+                counts[category_id] = int(count)
+        return counts
+
+    def keyword_counts_by_category(self, organization_id: UUID) -> dict[UUID, int]:
+        rows = self.db.execute(
+            select(Keyword.category_id, func.count())
+            .where(
+                Keyword.organization_id == organization_id,
+                Keyword.category_id.is_not(None),
+                Keyword.scope == KeywordScope.organization,
+                Keyword.status.in_([KeywordStatus.active, KeywordStatus.candidate]),
+            )
+            .group_by(Keyword.category_id)
+        ).all()
+        return {category_id: int(count) for category_id, count in rows if category_id}
+
+    def list_featured_categories(self, organization_id: UUID) -> list[NewsCategory]:
+        return list(
+            self.db.scalars(
+                select(NewsCategory)
+                .where(
+                    NewsCategory.organization_id == organization_id,
+                    NewsCategory.is_active.is_(True),
+                    NewsCategory.is_featured.is_(True),
+                )
                 .order_by(NewsCategory.sort_order, NewsCategory.name)
             ).all()
         )
+
+    def curated_keyword_counts(self, organization_id: UUID) -> dict[UUID, int]:
+        rows = self.db.execute(
+            select(Keyword.category_id, func.count())
+            .where(
+                Keyword.organization_id == organization_id,
+                Keyword.category_id.is_not(None),
+                Keyword.is_curated.is_(True),
+                Keyword.scope == KeywordScope.organization,
+                Keyword.status.in_([KeywordStatus.active, KeywordStatus.candidate]),
+            )
+            .group_by(Keyword.category_id)
+        ).all()
+        return {category_id: int(count) for category_id, count in rows if category_id}
+
+    def set_featured_categories(
+        self, organization_id: UUID, category_ids: list[UUID]
+    ) -> list[NewsCategory]:
+        unique_ids = list(dict.fromkeys(category_ids))
+        allowed = list(
+            self.db.scalars(
+                select(NewsCategory).where(
+                    NewsCategory.organization_id == organization_id,
+                    NewsCategory.id.in_(unique_ids),
+                    NewsCategory.is_active.is_(True),
+                )
+            ).all()
+        )
+        if len(allowed) != len(unique_ids):
+            raise BadRequestError("선택할 수 없는 분야가 포함되어 있습니다.")
+        featured_ids = {row.id for row in allowed}
+        for row in self.list_categories(organization_id):
+            row.is_featured = row.id in featured_ids
+        self.db.commit()
+        return self.list_featured_categories(organization_id)
 
     def list_keywords(
         self,
@@ -383,6 +554,24 @@ class TaxonomyService:
             return True
         return len(self.selected_ids(user.id)) >= 3
 
+    def keyword_ids_for_categories(
+        self, organization_id: UUID, category_ids: list[UUID]
+    ) -> list[UUID]:
+        if not category_ids:
+            return []
+        return list(
+            self.db.scalars(
+                select(Keyword.id).where(
+                    Keyword.organization_id == organization_id,
+                    Keyword.category_id.in_(category_ids),
+                    Keyword.status.in_(
+                        [KeywordStatus.active, KeywordStatus.candidate]
+                    ),
+                    Keyword.scope == KeywordScope.organization,
+                )
+            ).all()
+        )
+
     def curated_keyword_ids_for_categories(
         self, organization_id: UUID, category_ids: list[UUID]
     ) -> list[UUID]:
@@ -431,6 +620,7 @@ class TaxonomyService:
         curated_ids = self.curated_keyword_ids_for_categories(
             user.organization_id, unique_ids
         )
+        all_ids = self.keyword_ids_for_categories(user.organization_id, unique_ids)
         personal_ids = list(
             self.db.scalars(
                 select(UserKeywordSubscription.keyword_id)
@@ -441,15 +631,21 @@ class TaxonomyService:
                 )
             ).all()
         )
-        keyword_ids = list(dict.fromkeys([*curated_ids, *personal_ids]))
-        if not keyword_ids:
-            raise BadRequestError("선택한 분야에 사용할 수 있는 키워드가 없습니다.")
-        keywords = self.set_subscriptions(
-            user,
-            keyword_ids,
-            minimum=1,
-            replace_existing=True,
-        )
+        keyword_ids = list(dict.fromkeys([*curated_ids, *all_ids, *personal_ids]))
+        if keyword_ids:
+            keywords = self.set_subscriptions(
+                user,
+                keyword_ids,
+                minimum=1,
+                replace_existing=True,
+            )
+        else:
+            self.db.execute(
+                delete(UserKeywordSubscription).where(
+                    UserKeywordSubscription.user_id == user.id
+                )
+            )
+            keywords = []
         self.db.commit()
         return allowed, keywords
 
@@ -788,12 +984,9 @@ class ClassificationService:
                     merged[key] = value
 
         categories = taxonomy.list_categories(post.organization_id)
-        category_by_name = {normalize_keyword(c.name): c for c in categories}
         category_name = (merged.get("category") or post.category or "기타").strip()
-        category = category_by_name.get(normalize_keyword(category_name))
-        if not category:
-            category = category_by_name.get(normalize_keyword("기타"))
-        post.category = category.name if category else "기타"
+        category = taxonomy.get_or_create_category(post.organization_id, category_name)
+        post.category = category.name
 
         raw_keywords = merged.get("keywords") or []
         candidates: list[tuple[str, float, Keyword | None]] = []

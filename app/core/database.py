@@ -104,6 +104,12 @@ def _migrate_pg_columns() -> None:
                 f'ON "{_schema}".user_category_subscriptions (category_id)'
             )
         )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".news_categories '
+                "ADD COLUMN IF NOT EXISTS is_featured BOOLEAN NOT NULL DEFAULT true"
+            )
+        )
     logger.debug('Ensured background_jobs.status column width')
 
 

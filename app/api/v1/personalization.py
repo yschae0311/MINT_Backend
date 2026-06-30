@@ -15,6 +15,7 @@ from app.schemas.personalization import (
     CategoryRead,
     CategorySubscriptionUpdate,
     CategoryWrite,
+    FeaturedCategoriesUpdate,
     KeywordCreate,
     KeywordRead,
     KeywordMergeRequest,
@@ -37,6 +38,7 @@ from app.services.personalization_service import (
     PersonalizedNewsService,
     ReviewQueueService,
     TaxonomyService,
+    _DEFAULT_CATEGORY_NORMALIZED,
 )
 from app.models.personalization import NewsCategory
 from app.models.personalization import Keyword, PostKeyword, UserKeywordSubscription
@@ -47,10 +49,40 @@ from app.core.exceptions import BadRequestError, NotFoundError
 router = APIRouter()
 
 
-def _category_read(row, selected: set[UUID]) -> CategoryRead:
+def _category_read(
+    row,
+    selected: set[UUID],
+    *,
+    curated_keyword_count: int = 0,
+    keyword_count: int = 0,
+    post_count: int = 0,
+) -> CategoryRead:
     data = CategoryRead.model_validate(row)
     data.selected = row.id in selected
+    data.curated_keyword_count = curated_keyword_count
+    data.keyword_count = keyword_count
+    data.post_count = post_count
+    data.is_discovered = row.normalized_name not in _DEFAULT_CATEGORY_NORMALIZED
     return data
+
+
+def _list_category_reads(service: TaxonomyService, user: User) -> list[CategoryRead]:
+    service.sync_discovered_categories(user.organization_id)
+    service.ensure_defaults(user.organization_id)
+    selected = service.selected_category_ids(user.id)
+    curated_counts = service.curated_keyword_counts(user.organization_id)
+    keyword_counts = service.keyword_counts_by_category(user.organization_id)
+    post_counts = service.post_counts_by_category(user.organization_id)
+    return [
+        _category_read(
+            row,
+            selected,
+            curated_keyword_count=curated_counts.get(row.id, 0),
+            keyword_count=keyword_counts.get(row.id, 0),
+            post_count=post_counts.get(row.id, 0),
+        )
+        for row in service.list_categories(user.organization_id)
+    ]
 
 
 def _keyword_read(
@@ -72,12 +104,23 @@ def list_categories(
     db: Session = Depends(get_db),
 ):
     service = TaxonomyService(db)
-    service.ensure_defaults(user.organization_id)
+    rows = _list_category_reads(service, user)
     db.commit()
-    selected = service.selected_category_ids(user.id)
+    return rows
+
+
+@router.put("/categories/featured", response_model=list[CategoryRead])
+def update_featured_categories(
+    data: FeaturedCategoriesUpdate,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    service = TaxonomyService(db)
+    rows = service.set_featured_categories(user.organization_id, data.category_ids)
+    counts = service.curated_keyword_counts(user.organization_id)
     return [
-        _category_read(row, selected)
-        for row in service.list_categories(user.organization_id)
+        _category_read(row, set(), curated_keyword_count=counts.get(row.id, 0))
+        for row in rows
     ]
 
 
@@ -94,6 +137,7 @@ def create_category(
         name=data.name.strip(),
         normalized_name=normalize_keyword(data.name),
         sort_order=data.sort_order,
+        is_featured=False,
     )
     db.add(row)
     db.commit()
@@ -206,11 +250,9 @@ def update_my_categories(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    categories, _ = TaxonomyService(db).set_category_subscriptions(
-        user, data.category_ids
-    )
-    selected = {row.id for row in categories}
-    return [_category_read(row, selected) for row in categories]
+    service = TaxonomyService(db)
+    service.set_category_subscriptions(user, data.category_ids)
+    return _list_category_reads(service, user)
 
 
 @router.get("/users/me/keywords", response_model=list[KeywordRead])

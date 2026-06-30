@@ -18,10 +18,19 @@ class CategoryRead(ORMBase):
     name: str
     sort_order: int
     selected: bool = False
+    is_featured: bool = True
+    is_discovered: bool = False
+    curated_keyword_count: int = 0
+    keyword_count: int = 0
+    post_count: int = 0
+
+
+class FeaturedCategoriesUpdate(BaseModel):
+    category_ids: list[UUID] = Field(min_length=1, max_length=20)
 
 
 class CategorySubscriptionUpdate(BaseModel):
-    category_ids: list[UUID] = Field(min_length=1, max_length=8)
+    category_ids: list[UUID] = Field(min_length=1, max_length=20)
 
 
 class CategoryWrite(BaseModel):
