@@ -907,8 +907,8 @@ class CrawlerService:
                 )
             return self.crawl_source(source.id, organization_id)
         except Exception as exc:
-            logger.warning("Crawl failed for source %s (%s): %s", source.id, source.url, exc)
             self.db.rollback()
+            logger.warning("Crawl failed for source %s (%s): %s", source.id, source.url, exc)
             return CrawlResult(
                 source_id=source.id,
                 created=0,

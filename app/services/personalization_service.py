@@ -1019,16 +1019,16 @@ class ClassificationService:
 
         self.db.execute(delete(PostKeyword).where(PostKeyword.post_id == post.id))
         linked_names: list[str] = []
-        seen: set[str] = set()
+        seen_names: set[str] = set()
+        seen_keyword_ids: set[UUID] = set()
         for name, confidence, matched_keyword in sorted(
             candidates,
             key=lambda item: item[1],
             reverse=True,
         ):
             normalized = normalize_keyword(name)
-            if not normalized or normalized in seen:
+            if not normalized or normalized in seen_names:
                 continue
-            seen.add(normalized)
             keyword = matched_keyword or resolve_existing_keyword(
                 name,
                 organization_keywords,
@@ -1056,6 +1056,10 @@ class ClassificationService:
                 if normalize_keyword(name) != keyword.normalized_name:
                     add_keyword_alias(keyword, name)
                 keyword.usage_count = int(keyword.usage_count or 0) + 1
+            if keyword.id in seen_keyword_ids:
+                continue
+            seen_names.add(normalized)
+            seen_keyword_ids.add(keyword.id)
             self.db.add(
                 PostKeyword(
                     post_id=post.id,

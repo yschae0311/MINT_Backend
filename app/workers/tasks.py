@@ -306,6 +306,7 @@ def crawl_all_sources_task():
                 )
                 jobs.complete_job(job.id, msg)
             except Exception as exc:
+                db.rollback()
                 logger.exception("crawl_all_sources org=%s failed", org.id)
                 jobs.fail_job(job.id, str(exc))
     finally:
@@ -375,6 +376,7 @@ def discovery_pipeline_task(trusted_only: bool = True):
                 )
                 jobs.complete_job(job.id, msg)
             except Exception as exc:
+                db.rollback()
                 logger.exception("discovery_pipeline org=%s failed", org.id)
                 jobs.fail_job(job.id, str(exc))
     finally:

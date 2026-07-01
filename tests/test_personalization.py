@@ -247,6 +247,59 @@ class PersonalizationServiceTest(unittest.TestCase):
         self.assertIn("CSMS", names)
         self.assertNotIn("CSMS 플랫폼", names)
 
+    def test_classify_dedupes_duplicate_keyword_ids(self) -> None:
+        post = Post(
+            organization_id=self.user.organization_id,
+            board_type=BoardType.trusted,
+            title="중복 키워드 테스트",
+            raw_content="본문에 키워드 없음",
+            content_hash=hashlib.sha256(b"dedupe-test").hexdigest(),
+            status=PostStatus.published,
+            trust_level=TrustLevel.high,
+            reliability_score=90,
+            created_by=CreatedBy.crawler,
+        )
+        self.db.add(post)
+        self.db.flush()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "CSMS/OCPP",
+                "confidence": 0.9,
+                "keywords": [
+                    {"name": "OCPP", "confidence": 0.9},
+                    {"name": "OCPP", "confidence": 0.8},
+                ],
+            },
+        )
+        self.db.commit()
+        links = self.db.scalars(
+            select(PostKeyword).where(PostKeyword.post_id == post.id)
+        ).all()
+        keyword_ids = [link.keyword_id for link in links]
+        self.assertEqual(len(keyword_ids), len(set(keyword_ids)))
+
+    def test_classify_dedupes_ai_and_body_match_for_same_keyword(self) -> None:
+        post = self._post()
+        ClassificationService(self.db).classify_post(
+            post,
+            {
+                "category": "CSMS/OCPP",
+                "confidence": 0.9,
+                "keywords": [{"name": "OCPP", "confidence": 0.9}],
+            },
+        )
+        self.db.commit()
+        links = self.db.scalars(
+            select(PostKeyword).where(PostKeyword.post_id == post.id)
+        ).all()
+        ocpp_links = [
+            link
+            for link in links
+            if self.db.get(Keyword, link.keyword_id) and self.db.get(Keyword, link.keyword_id).name == "OCPP"
+        ]
+        self.assertEqual(len(ocpp_links), 1)
+
     def test_category_subscription_selects_curated_keywords(self) -> None:
         categories = self.taxonomy.list_categories(self.user.organization_id)
         csms = next(item for item in categories if item.name == "CSMS/OCPP")
