@@ -85,9 +85,22 @@ def _recent_posts(
             q = q.where(Source.source_type.in_(_COMMUNITY_SOURCE_TYPES))
         elif exclude_community:
             q = q.where(Source.source_type.not_in(_COMMUNITY_SOURCE_TYPES))
-    posts = db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).unique().all()
-    contents = mget_post_contents(db, [post.id for post in posts])
-    return [_post_preview(p, db, contents.get(p.id)) for p in posts]
+    from app.services.ev_display_filter import is_ev_related_post
+
+    # Over-fetch then filter so dashboard previews stay EV-focused after legacy junk.
+    candidates = db.scalars(q.order_by(Post.collected_at.desc()).limit(limit * 8)).unique().all()
+    contents = mget_post_contents(db, [post.id for post in candidates])
+    filtered: list[Post] = []
+    for post in candidates:
+        body = ""
+        content = contents.get(post.id)
+        if content is not None:
+            body = (content.body or content.summary or "")[:4000]
+        if is_ev_related_post(post, body=body):
+            filtered.append(post)
+        if len(filtered) >= limit:
+            break
+    return [_post_preview(p, db, contents.get(p.id)) for p in filtered]
 
 
 @router.get("/dashboard", response_model=DashboardStatsResponse)
@@ -165,11 +178,18 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
             title = (item.get("title") or "").strip()
             if not title:
                 continue
+            related_raw = item.get("related_post_ids") or []
+            related_ids = [
+                str(pid)
+                for pid in related_raw
+                if pid is not None and str(pid).strip()
+            ]
             highlights.append(
                 DashboardReportHighlight(
                     title=title[:120],
                     description=(item.get("description") or "").strip()[:200] or None,
                     importance=item.get("importance"),
+                    related_post_ids=related_ids,
                 )
             )
         latest_report = DashboardLatestReport(

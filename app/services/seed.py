@@ -17,6 +17,8 @@ COMMUNITY_SOURCE_SEEDS = (
         "url": "https://www.clien.net/service/board/park",
         "source_type": SourceType.community_forum,
         "category": "커뮤니티/현장",
+        # 잡담판 — EV 게이트만으로는 노이즈가 큼. 기본 비활성(관리자가 필요 시 켜기).
+        "is_active": False,
     },
     {
         "name": "클리앙 사용기",
@@ -55,6 +57,8 @@ TRUSTED_POLICY_SOURCE_SEEDS = (
         "source_type": SourceType.rss,
         "category": "정책/규제",
         "reliability_score": 95,
+        # 범정부 정책 RSS — EV 외 잡글이 많음. 기본 비활성.
+        "is_active": False,
     },
     {
         "name": "정책브리핑 부처 브리핑",
@@ -62,6 +66,7 @@ TRUSTED_POLICY_SOURCE_SEEDS = (
         "source_type": SourceType.rss,
         "category": "정책/규제",
         "reliability_score": 96,
+        "is_active": False,
     },
     {
         "name": "기후에너지환경부 전기차·충전 공지",
@@ -182,6 +187,26 @@ def _deactivate_broken_ev_portal_source(db: Session, organization_id) -> None:
         row.is_active = False
 
 
+_BROAD_NOISE_SOURCE_URLS = (
+    "https://www.korea.kr/rss/policy.xml",
+    "https://www.korea.kr/rss/ebriefing.xml",
+    "https://www.clien.net/service/board/park",
+)
+
+
+def _deactivate_broad_noise_sources(db: Session, organization_id) -> None:
+    """범정부 RSS·잡담판 등 EV 초점을 흐리는 소스는 기본 비활성."""
+    rows = db.scalars(
+        select(Source).where(
+            Source.organization_id == organization_id,
+            Source.url.in_(_BROAD_NOISE_SOURCE_URLS),
+            Source.is_active.is_(True),
+        )
+    ).all()
+    for row in rows:
+        row.is_active = False
+
+
 def _seed_sources(db: Session, organization_id, seeds: tuple, *, low_trust: bool) -> None:
     for seed in seeds:
         exists = db.scalar(
@@ -202,7 +227,7 @@ def _seed_sources(db: Session, organization_id, seeds: tuple, *, low_trust: bool
                 trust_level=TrustLevel.low if low_trust else TrustLevel.high,
                 reliability_score=seed.get("reliability_score", 45 if low_trust else 85),
                 auto_publish=not low_trust,
-                is_active=True,
+                is_active=seed.get("is_active", True),
             )
         )
 
@@ -229,6 +254,7 @@ def seed_defaults(db: Session) -> None:
 
     _deactivate_reddit_sources(db, org.id)
     _deactivate_broken_ev_portal_source(db, org.id)
+    _deactivate_broad_noise_sources(db, org.id)
     _migrate_mcee_sources(db, org.id)
 
     _seed_sources(db, org.id, COMMUNITY_SOURCE_SEEDS, low_trust=True)

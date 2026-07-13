@@ -169,7 +169,7 @@ class GeminiClient(LLMClient):
             self.summary_model,
             system,
             user,
-            string_fields=("summary", "impact", "category"),
+            string_fields=("summary", "impact", "category", "relevance_reason"),
             list_fields=("action_items",),
         )
 
@@ -281,9 +281,26 @@ class MockLLMClient(LLMClient):
     def evaluate_discovery_candidate(
         self, title: str, content: str, url: str, *, community: bool = False
     ) -> dict:
+        from app.services.ev_relevance import passes_keyword_gate
+
+        relevant = passes_keyword_gate(title, content, url)
         classified = self.classify_post_content(title, content)
         prefix = "커뮤니티 의견·미검증 — " if community else ""
+        if not relevant:
+            return {
+                "is_relevant": False,
+                "relevance_reason": "EV/충전 직접 관련 신호 없음",
+                "summary": "",
+                "impact": "",
+                "action_items": [],
+                "importance": "low",
+                "confidence": 0.35,
+                "category": "",
+                "keywords": [],
+            }
         return {
+            "is_relevant": True,
+            "relevance_reason": "EV/충전 직접 관련 신호 확인",
             "summary": f"{prefix}{title[:120]} — 수집된 {'커뮤니티' if community else '뉴스'} 후보입니다.",
             "impact": "조직 키워드·업무 관점에서 확인이 필요합니다.",
             "action_items": ["원문 링크 확인"],

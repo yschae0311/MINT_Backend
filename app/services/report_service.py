@@ -117,9 +117,22 @@ class ReportService:
             )
         ).unique().all()
 
+        from app.services.ev_display_filter import is_ev_related_post
+        from app.search.post_content import mget_post_contents
+
+        contents = mget_post_contents(self.db, [p.id for p in posts])
+        ev_posts = []
+        for p in posts:
+            content = contents.get(p.id)
+            body = ""
+            if content is not None:
+                body = (content.body or content.summary or "")[:4000]
+            if is_ev_related_post(p, body=body):
+                ev_posts.append(p)
+
         eligible = [
             p
-            for p in posts
+            for p in ev_posts
             if p.board_type in (BoardType.trusted, BoardType.discovery)
         ]
         trusted_posts = [p for p in eligible if p.board_type == BoardType.trusted]

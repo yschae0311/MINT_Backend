@@ -22,6 +22,7 @@ class DashboardReportHighlight(BaseModel):
     title: str
     description: str | None = None
     importance: str | None = None
+    related_post_ids: list[str] = []
 
 
 class DashboardLatestReport(BaseModel):

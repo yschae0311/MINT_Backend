@@ -36,6 +36,7 @@ from app.services.gov_sources import (
     extract_gov_article_text,
     is_gov_notice_host,
 )
+from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 from app.services.post_dedup import compute_content_hash, find_existing_post
 from app.search.post_content import BODY_MAX_CHARS, PostContent, clear_pg_text_fields, pg_ai_summary_placeholder, save_post_content
@@ -486,25 +487,44 @@ class CrawlerService:
             self._tick_discovery_progress("skipped")
             return "skipped", "content_short"
 
-        if is_obvious_junk(title, content, url):
+        if not passes_keyword_gate(title, content, url):
+            from app.services.ev_relevance import is_weak_topic_only
+
+            reason = "weak_topic_only" if is_weak_topic_only(title, content, url) else "ai_topic_mismatch"
+            logger.debug("Discovery keyword gate rejected (%s): %s", reason, title[:80])
             self._tick_discovery_progress("skipped")
-            return "skipped", "site_junk"
+            return "skipped", reason
+
+        if stats.billing_depleted:
+            stats.add("ai_billing_depleted")
+            self._tick_discovery_progress("skipped")
+            return "skipped", "ai_billing_depleted"
 
         self._start_discovery_candidate(title)
 
-        evaluation: dict = {}
-        if not stats.billing_depleted:
-            try:
-                client = get_llm_client()
-                evaluation = client.evaluate_discovery_candidate(
-                    title, content, url, community=self._is_community_source(source)
-                )
-            except Exception as exc:
-                reason = classify_eval_error(exc)
-                logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
-                stats.add(reason, sample=str(exc))
-                if reason == "ai_billing_depleted":
-                    logger.error("Gemini billing depleted — saving without AI for remaining items")
+        try:
+            client = get_llm_client()
+            evaluation = client.evaluate_discovery_candidate(
+                title, content, url, community=self._is_community_source(source)
+            )
+        except Exception as exc:
+            reason = classify_eval_error(exc)
+            logger.warning("Discovery AI evaluation failed for %s: %s", url, exc)
+            stats.add(reason, sample=str(exc))
+            if reason == "ai_billing_depleted":
+                logger.error("Gemini billing depleted — skipping further AI evaluations this run")
+            self._tick_discovery_progress("skipped")
+            return "skipped", reason
+
+        reject = ai_reject_reason(evaluation, title, content, url)
+        if reject:
+            logger.debug(
+                "Discovery rejected: %s — %s",
+                title[:80],
+                evaluation.get("relevance_reason") or reject,
+            )
+            self._tick_discovery_progress("skipped")
+            return "skipped", reject
 
         ok, reason, needs_review = self._save_discovery_post(
             source, title, url, evaluation, published_at, body=content
@@ -793,17 +813,25 @@ class CrawlerService:
         if len(content) < self._min_content_len_for(source):
             return False
 
-        if is_obvious_junk(title, content, url or ""):
-            logger.debug("Crawl junk page skipped: %s", title[:80])
+        if not passes_keyword_gate(title, content, url or ""):
+            logger.debug("Crawl keyword gate rejected: %s", title[:80])
             return False
 
-        evaluation: dict = {}
+        evaluation: dict | None = None
         try:
             evaluation = get_llm_client().evaluate_discovery_candidate(
                 title, content, url or "", community=self._is_community_source(source)
             )
         except Exception as exc:
             logger.warning("Crawl AI evaluation failed for %s: %s", url, exc)
+            return False
+        if not passes_ai_evaluation(evaluation, title, content, url or ""):
+            logger.debug(
+                "Crawl AI relevance rejected: %s — %s",
+                title[:80],
+                evaluation.get("relevance_reason"),
+            )
+            return False
 
         content_hash = compute_content_hash(url, title)
         stored_title = localized_title_for_storage(title)

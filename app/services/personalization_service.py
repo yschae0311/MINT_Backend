@@ -14,6 +14,7 @@ from app.core.exceptions import BadRequestError, NotFoundError
 from app.core.config import get_settings
 from app.models.ai_output import AIOutput
 from app.models.enums import (
+    BoardType,
     Importance,
     KeywordMatchMethod,
     KeywordScope,
@@ -21,6 +22,7 @@ from app.models.enums import (
     PostStatus,
     ReviewQueueReason,
     ReviewQueueStatus,
+    SourceType,
 )
 from app.models.personalization import (
     Keyword,
@@ -34,6 +36,7 @@ from app.models.personalization import (
     UserKeywordSubscription,
 )
 from app.models.post import Post
+from app.models.source import Source
 from app.models.user import User
 from app.schemas.personalization import (
     MatchedKeyword,
@@ -45,6 +48,7 @@ from app.schemas.personalization import (
 )
 from app.search.post_content import PostContent, get_post_content, mget_post_contents, legacy_pg_content_enabled, sync_post_metadata
 from app.search.post_search_query import PostSearchFilters, load_posts_ordered, search_posts
+from app.services.community_sources import COMMUNITY_SOURCE_TYPES, is_community_source_type
 from app.services.llm_client import get_llm_client
 
 KST = ZoneInfo("Asia/Seoul")
@@ -619,10 +623,11 @@ class TaxonomyService:
             self.db.add(
                 UserCategorySubscription(user_id=user.id, category_id=category.id)
             )
+        # Category-first: only curated keywords under selected categories
+        # (avoid auto-subscribing every AI-discovered candidate).
         curated_ids = self.curated_keyword_ids_for_categories(
             user.organization_id, unique_ids
         )
-        all_ids = self.keyword_ids_for_categories(user.organization_id, unique_ids)
         personal_ids = list(
             self.db.scalars(
                 select(UserKeywordSubscription.keyword_id)
@@ -633,7 +638,7 @@ class TaxonomyService:
                 )
             ).all()
         )
-        keyword_ids = list(dict.fromkeys([*curated_ids, *all_ids, *personal_ids]))
+        keyword_ids = list(dict.fromkeys([*curated_ids, *personal_ids]))
         if keyword_ids:
             keywords = self.set_subscriptions(
                 user,
@@ -1325,6 +1330,7 @@ class PersonalizedNewsService:
         keyword_ids: list[UUID] | None = None,
         category: str | None = None,
         importance: Importance | None = None,
+        content_kind: str | None = None,
         query: str | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
@@ -1387,6 +1393,18 @@ class PersonalizedNewsService:
             q = q.where(Post.category == category)
         if importance:
             q = q.where(Post.importance == importance)
+        kind = (content_kind or "").strip().lower()
+        if kind in {"news", "official", "community", "discovery"}:
+            q = q.join(Source, Source.id == Post.source_id)
+            if kind in {"news", "official"}:
+                q = q.where(Source.source_type.not_in(COMMUNITY_SOURCE_TYPES))
+            elif kind == "community":
+                q = q.where(Source.source_type.in_(COMMUNITY_SOURCE_TYPES))
+            elif kind == "discovery":
+                q = q.where(
+                    Post.board_type == BoardType.discovery,
+                    Source.source_type.not_in(COMMUNITY_SOURCE_TYPES),
+                )
         if query:
             like = f"%{query.strip()}%"
             q = q.outerjoin(AIOutput).where(
@@ -1402,10 +1420,17 @@ class PersonalizedNewsService:
         # DISTINCT on full Post rows fails on PostgreSQL (posts.keywords is JSON).
         posts = list(self.db.scalars(q.order_by(Post.collected_at.desc())).unique().all())
         contents = mget_post_contents(self.db, [post.id for post in posts])
-        items = [
-            self._to_item(post, selected, user.id, contents.get(post.id))
-            for post in posts
-        ]
+        from app.services.ev_display_filter import is_ev_related_post
+
+        items = []
+        for post in posts:
+            content = contents.get(post.id)
+            body = ""
+            if content is not None:
+                body = (content.body or content.summary or "")[:4000]
+            if not is_ev_related_post(post, body=body):
+                continue
+            items.append(self._to_item(post, selected, user.id, content))
         if personalized:
             items = self._diversified(items)
         total = len(items)
@@ -1466,16 +1491,25 @@ class PersonalizedNewsService:
         posts = load_posts_ordered(self.db, [hit.post_id for hit in result.hits])
         hit_by_id = {hit.post_id: hit for hit in result.hits}
         contents = mget_post_contents(self.db, [post.id for post in posts])
-        items = [
-            self._to_item(
-                post,
-                selected,
-                user.id,
-                contents.get(post.id),
-                hit=hit_by_id.get(post.id),
+        from app.services.ev_display_filter import is_ev_related_post
+
+        items = []
+        for post in posts:
+            content = contents.get(post.id)
+            body = ""
+            if content is not None:
+                body = (content.body or content.summary or "")[:4000]
+            if not is_ev_related_post(post, body=body):
+                continue
+            items.append(
+                self._to_item(
+                    post,
+                    selected,
+                    user.id,
+                    content,
+                    hit=hit_by_id.get(post.id),
+                )
             )
-            for post in posts
-        ]
         if personalized:
             items = self._diversified(items)
             total = len(items)
@@ -1546,10 +1580,25 @@ class PersonalizedNewsService:
         }[post.importance]
         source_score = min(max(post.reliability_score, 0), 100) / 50
         freshness = max(0, 2 - age_hours / 36)
+        source_type = post.source.source_type if post.source else None
+        source_type_value = (
+            source_type.value if isinstance(source_type, SourceType) else source_type
+        )
+        board_value = (
+            post.board_type.value
+            if isinstance(post.board_type, BoardType)
+            else post.board_type
+        )
+        community = bool(
+            source_type is not None and is_community_source_type(source_type)
+        )
         return NewsItem(
             id=post.id,
             title=post.title,
             source_name=post.source.name if post.source else None,
+            source_type=source_type_value,
+            board_type=board_value,
+            is_community=community,
             category=post.category,
             collected_at=post.collected_at,
             original_url=content.original_url,

@@ -6,8 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.config import get_settings
 from app.core.permissions import require_admin
 from app.core.security import get_current_user
+from app.core.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.models.enums import Importance, JobType, KeywordMatchMethod, KeywordStatus, ReviewQueueStatus
 from app.models.user import User
 from app.schemas.job import JobRead
@@ -44,9 +46,13 @@ from app.models.personalization import NewsCategory
 from app.models.personalization import Keyword, PostKeyword, UserKeywordSubscription
 from app.models.post import Post
 from app.models.source import Source
-from app.core.exceptions import BadRequestError, NotFoundError
 
 router = APIRouter()
+
+
+def _require_personalization_enabled() -> None:
+    if not get_settings().personalization_enabled:
+        raise ForbiddenError("개인화 기능이 일시 중지되었습니다.")
 
 
 def _category_read(
@@ -250,6 +256,7 @@ def update_my_categories(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     service = TaxonomyService(db)
     service.set_category_subscriptions(user, data.category_ids)
     return _list_category_reads(service, user)
@@ -260,6 +267,7 @@ def my_keywords(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     service = TaxonomyService(db)
     selected = service.selected_ids(user.id)
     return [
@@ -275,6 +283,7 @@ def update_my_keywords(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     rows = TaxonomyService(db).set_subscriptions(user, data.keyword_ids)
     selected = {row.id for row in rows}
     return [_keyword_read(row, selected) for row in rows]
@@ -286,6 +295,7 @@ def create_my_keyword(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     row = TaxonomyService(db).create_custom_keyword(user, data.name)
     return _keyword_read(row, {row.id})
 
@@ -297,6 +307,7 @@ def personal_feed(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     return PersonalizedNewsService(db).list_news(
         user,
         personalized=True,
@@ -310,6 +321,10 @@ def all_news(
     keyword_ids: list[UUID] | None = Query(default=None),
     category: str | None = None,
     importance: Importance | None = None,
+    content_kind: str | None = Query(
+        default=None,
+        description="news|community|discovery — filter official news vs community vs discovery",
+    ),
     q: str | None = Query(default=None, max_length=200),
     date_from: date | None = None,
     date_to: date | None = None,
@@ -324,6 +339,7 @@ def all_news(
         keyword_ids=keyword_ids,
         category=category,
         importance=importance,
+        content_kind=content_kind,
         query=q,
         date_from=date_from,
         date_to=date_to,
@@ -337,6 +353,7 @@ def list_personal_reports(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     return PersonalReportService(db).list_reports(user)
 
 
@@ -345,6 +362,7 @@ def latest_personal_report(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     return PersonalReportService(db).latest(user)
 
 
@@ -354,6 +372,7 @@ def generate_personal_report(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     from app.services.job_service import JobService, dispatch_task
     from app.workers.tasks import generate_personal_report_job_task
 
@@ -394,6 +413,7 @@ def get_personal_report(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     return PersonalReportService(db).get(report_id, user)
 
 
@@ -404,6 +424,7 @@ def mark_personal_report_view(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_personalization_enabled()
     PersonalReportService(db).mark_view(
         report_id,
         user,

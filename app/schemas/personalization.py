@@ -84,6 +84,9 @@ class NewsItem(BaseModel):
     id: UUID
     title: str
     source_name: str | None
+    source_type: str | None = None
+    board_type: str | None = None
+    is_community: bool = False
     category: str | None
     collected_at: datetime
     original_url: str | None
