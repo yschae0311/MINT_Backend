@@ -17,7 +17,8 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = "change-me"
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 1440
+    jwt_access_token_expire_minutes: int = 60
+    jwt_refresh_token_expire_days: int = 30
 
     llm_provider: str = "gemini"
     gemini_api_key: str = ""

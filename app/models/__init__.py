@@ -17,6 +17,7 @@ from app.models.personalization import (
 )
 from app.models.search_index_queue import SearchIndexQueue
 from app.models.post import Post
+from app.models.refresh_token import RefreshToken
 from app.models.slack_webhook import SlackWebhook
 from app.models.source import Source
 from app.models.user import User
@@ -44,4 +45,5 @@ __all__ = [
     "PersonalReportView",
     "ReviewQueueItem",
     "SearchIndexQueue",
+    "RefreshToken",
 ]

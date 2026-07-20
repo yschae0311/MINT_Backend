@@ -32,3 +32,4 @@ class User(Base):
     )
 
     organization = relationship("Organization", back_populates="users")
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
