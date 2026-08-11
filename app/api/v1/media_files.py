@@ -1,22 +1,23 @@
-"""Serve uploaded media through the API prefix (works behind /api reverse proxies)."""
+"""Serve uploaded media through the API prefix (works behind /api reverse proxies).
+
+Note: <img src> cannot send Authorization headers, so this route is public.
+Paths include opaque UUIDs (org/report ids), which is acceptable for editorial assets.
+"""
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
-from app.core.security import get_current_user
-from app.models.user import User
 
 router = APIRouter()
 
 
 @router.get("/{file_path:path}")
-def get_media_file(file_path: str, user: User = Depends(get_current_user)):
-    """Authenticated media fetch under /api/v1/files/..."""
-    _ = user
+def get_media_file(file_path: str):
+    """Public media fetch under /api/v1/files/... (for <img> tags)."""
     settings = get_settings()
     root = Path(settings.media_root).resolve()
     target = (root / file_path).resolve()
