@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     media_root: str = "uploads"
     media_url_prefix: str = "/media"
 
+    # Daily corner weather (Open-Meteo, no API key). Default: Seoul.
+    weather_enabled: bool = True
+    weather_latitude: float = 37.5665
+    weather_longitude: float = 126.9780
+    weather_location_name: str = "서울"
+
     slack_webhook_encryption_key: str = "change-me-32-byte-key-here!!!!"
 
     cors_origins: str = "http://localhost:5173"

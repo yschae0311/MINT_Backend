@@ -344,6 +344,14 @@ class ReportService:
 
         image_bytes = illus.generate_image_bytes(scene)
         if not image_bytes:
+            fallback = self._fallback_illustration_url(organization_id, illus)
+            if fallback:
+                logger.warning(
+                    "Front photo generation failed; reusing previous illustration for org=%s",
+                    organization_id,
+                )
+                self._link_report_illustration(report_id, organization_id, fallback)
+                return fallback
             raise BadRequestError("이미지 생성에 실패했습니다.")
 
         url = illus.save_front_cache(organization_id, today, image_bytes)
@@ -353,6 +361,25 @@ class ReportService:
             self.db.commit()
             return report.illustration_url
         return url
+
+    def _fallback_illustration_url(
+        self,
+        organization_id: UUID,
+        illus: ReportIllustrationService,
+    ) -> str | None:
+        cached = illus.latest_front_cache(organization_id)
+        if cached:
+            return cached
+        return self.db.scalar(
+            select(DailyReport.illustration_url)
+            .where(
+                DailyReport.organization_id == organization_id,
+                DailyReport.illustration_url.is_not(None),
+                DailyReport.illustration_url != "",
+            )
+            .order_by(DailyReport.report_date.desc())
+            .limit(1)
+        )
 
     def _link_report_illustration(
         self,

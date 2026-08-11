@@ -60,3 +60,15 @@ class FrontPhotoRequest(BaseModel):
 
 class FrontPhotoResponse(BaseModel):
     illustration_url: str
+
+
+class WeatherResponse(BaseModel):
+    location: str
+    temperature_c: float
+    feels_like_c: float | None = None
+    humidity_pct: int | None = None
+    wind_kmh: float | None = None
+    condition: str
+    high_c: float | None = None
+    low_c: float | None = None
+    weather_code: int

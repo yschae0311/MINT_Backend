@@ -20,13 +20,15 @@ from app.schemas.stats import (
     DashboardStatsResponse,
     FrontPhotoRequest,
     FrontPhotoResponse,
+    WeatherResponse,
 )
 from app.search.post_content import get_post_content, legacy_pg_content_enabled, mget_post_contents, pg_ai_summary_placeholder
 from app.services.org_settings_service import OrgSettingsService
 from app.services.post_service import PostService
 from app.services.personalization_service import ReviewQueueService
 from app.services.report_service import ReportService
-from app.core.exceptions import BadRequestError
+from app.services.weather_service import WeatherService
+from app.core.exceptions import BadRequestError, ServiceUnavailableError
 
 router = APIRouter()
 
@@ -253,3 +255,22 @@ def ensure_front_photo(
         seed=body.seed,
     )
     return FrontPhotoResponse(illustration_url=url)
+
+
+@router.get("/weather", response_model=WeatherResponse)
+def today_weather(user: User = Depends(get_current_user)):
+    _ = user
+    snap = WeatherService().get_today()
+    if not snap:
+        raise ServiceUnavailableError("날씨 정보를 불러올 수 없습니다.")
+    return WeatherResponse(
+        location=snap.location,
+        temperature_c=snap.temperature_c,
+        feels_like_c=snap.feels_like_c,
+        humidity_pct=snap.humidity_pct,
+        wind_kmh=snap.wind_kmh,
+        condition=snap.condition,
+        high_c=snap.high_c,
+        low_c=snap.low_c,
+        weather_code=snap.weather_code,
+    )

@@ -1,5 +1,6 @@
 import base64
 import logging
+import time
 from pathlib import Path
 from uuid import UUID
 
@@ -11,16 +12,28 @@ logger = logging.getLogger(__name__)
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Older preview ids 404; try current stable then preview fallback.
+_DEAD_IMAGE_MODELS = {
+    "gemini-2.0-flash-preview-image-generation",
+    "gemini-2.0-flash-exp-image-generation",
+    "imagen-3.0-generate-002",
+}
+
+# Prefer known-good ids first; env primary is inserted unless dead.
 _IMAGE_MODEL_FALLBACKS = (
     "gemini-2.5-flash-image",
     "gemini-2.5-flash-image-preview",
+    "gemini-3.1-flash-image-preview",
 )
 
 NEWSPAPER_SKETCH_PREFIX = (
     "Black and white newspaper editorial sketch illustration, pen and ink cross-hatching, "
     "newsprint texture, high contrast grayscale only, no color, no text, no logos, "
     "no readable signs, no photorealism, no human faces, metaphorical scene: "
+)
+
+_SIMPLE_SCENE = (
+    "a quiet electric vehicle charging plaza at dawn, cables and soft geometric shapes, "
+    "editorial metaphor, empty of people"
 )
 
 
@@ -33,9 +46,13 @@ class ReportIllustrationService:
     def _model_candidates(self) -> list[str]:
         primary = (self.settings.gemini_image_model or "").strip()
         ordered: list[str] = []
-        for name in (primary, *_IMAGE_MODEL_FALLBACKS):
-            if name and name not in ordered:
-                ordered.append(name)
+        for name in (*_IMAGE_MODEL_FALLBACKS, primary):
+            if not name or name in _DEAD_IMAGE_MODELS or name in ordered:
+                continue
+            ordered.append(name)
+        # Keep configured primary first when it is still valid.
+        if primary and primary not in _DEAD_IMAGE_MODELS:
+            ordered = [primary, *[m for m in ordered if m != primary]]
         return ordered
 
     def generate_image_bytes(self, scene: str) -> bytes | None:
@@ -43,46 +60,76 @@ class ReportIllustrationService:
         if not api_key or not self.settings.report_illustration_enabled:
             return None
 
-        prompt = f"{NEWSPAPER_SKETCH_PREFIX}{scene.strip()}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseModalities": ["IMAGE"],
-                "imageConfig": {"aspectRatio": "4:3"},
+        scenes = [scene.strip(), _SIMPLE_SCENE]
+        payloads = [
+            {
+                "generationConfig": {
+                    "responseModalities": ["IMAGE"],
+                    "imageConfig": {"aspectRatio": "4:3"},
+                }
             },
-        }
+            {
+                "generationConfig": {
+                    "responseModalities": ["TEXT", "IMAGE"],
+                }
+            },
+            {
+                "generationConfig": {
+                    "responseModalities": ["IMAGE"],
+                }
+            },
+        ]
 
-        last_error: Exception | None = None
-        for model in self._model_candidates():
-            url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
-            try:
-                with httpx.Client(timeout=120.0) as client:
-                    response = client.post(url, params={"key": api_key}, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
-            except Exception as exc:
-                last_error = exc
-                logger.warning("Report illustration API failed (model=%s): %s", model, exc)
+        for attempt_scene in scenes:
+            if not attempt_scene:
                 continue
+            prompt = f"{NEWSPAPER_SKETCH_PREFIX}{attempt_scene}"
+            for model in self._model_candidates():
+                for cfg in payloads:
+                    payload = {
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        **cfg,
+                    }
+                    image = self._request_image(api_key, model, payload)
+                    if image:
+                        return image
+                time.sleep(0.4)
 
-            for candidate in data.get("candidates") or []:
-                for part in candidate.get("content", {}).get("parts") or []:
-                    inline = part.get("inlineData") or part.get("inline_data")
-                    if not inline:
-                        continue
-                    raw = inline.get("data")
-                    if not raw:
-                        continue
-                    try:
-                        return base64.b64decode(raw)
-                    except Exception as exc:
-                        logger.warning("Report illustration decode failed: %s", exc)
-                        return None
+        logger.warning("Report illustration exhausted all model/payload fallbacks")
+        return None
 
-            logger.warning("Report illustration API returned no image (model=%s)", model)
+    def _request_image(self, api_key: str, model: str, payload: dict) -> bytes | None:
+        url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                response = client.post(url, params={"key": api_key}, json=payload)
+                if response.status_code in {404, 400}:
+                    logger.warning(
+                        "Report illustration rejected (model=%s status=%s): %s",
+                        model,
+                        response.status_code,
+                        (response.text or "")[:240],
+                    )
+                    return None
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:
+            logger.warning("Report illustration API failed (model=%s): %s", model, exc)
+            return None
 
-        if last_error:
-            logger.warning("Report illustration exhausted model fallbacks: %s", last_error)
+        for candidate in data.get("candidates") or []:
+            for part in candidate.get("content", {}).get("parts") or []:
+                inline = part.get("inlineData") or part.get("inline_data")
+                if not inline:
+                    continue
+                raw = inline.get("data")
+                if not raw:
+                    continue
+                try:
+                    return base64.b64decode(raw)
+                except Exception as exc:
+                    logger.warning("Report illustration decode failed: %s", exc)
+                    return None
         return None
 
     def save_for_report(self, report_id: UUID, image_bytes: bytes) -> str:
@@ -111,4 +158,20 @@ class ReportIllustrationService:
         return (
             f"{self.settings.media_url_prefix.rstrip('/')}"
             f"/front/{organization_id}/{path.name}"
+        )
+
+    def latest_front_cache(self, organization_id: UUID) -> str | None:
+        folder = self.media_root / "front" / str(organization_id)
+        if not folder.is_dir():
+            return None
+        files = sorted(
+            (p for p in folder.glob("*.png") if p.is_file() and p.stat().st_size > 100),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not files:
+            return None
+        return (
+            f"{self.settings.media_url_prefix.rstrip('/')}"
+            f"/front/{organization_id}/{files[0].name}"
         )
