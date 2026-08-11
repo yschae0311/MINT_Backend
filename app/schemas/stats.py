@@ -56,6 +56,7 @@ class FrontPhotoRequest(BaseModel):
     title: str | None = Field(default=None, max_length=300)
     summary: str | None = Field(default=None, max_length=800)
     seed: str | None = Field(default=None, max_length=120)
+    force: bool = False
 
 
 class FrontPhotoResponse(BaseModel):

@@ -283,6 +283,7 @@ class ReportService:
         title: str | None = None,
         summary: str | None = None,
         seed: str | None = None,
+        force: bool = False,
     ) -> str:
         """Return today's front-page illustration (generate at most once per KST day)."""
         _ = seed  # retained for API compat; daily cache is date-keyed
@@ -292,6 +293,10 @@ class ReportService:
 
         today = datetime.now(KST).date().isoformat()
         illus = ReportIllustrationService()
+
+        if force:
+            self._clear_today_front_photo(organization_id, today, report_id, illus)
+
         cached = illus.read_front_cache(organization_id, today)
         if cached:
             self._link_report_illustration(report_id, organization_id, cached)
@@ -305,7 +310,7 @@ class ReportService:
                     DailyReport.organization_id == organization_id,
                 )
             )
-            if report and report.illustration_url:
+            if report and report.illustration_url and not force:
                 # Reuse existing report art for today without regenerating.
                 try:
                     src = Path(settings.media_root) / report.illustration_url.lstrip("/").removeprefix(
@@ -345,7 +350,7 @@ class ReportService:
         image_bytes = illus.generate_image_bytes(scene)
         if not image_bytes:
             fallback = self._fallback_illustration_url(organization_id, illus)
-            if fallback:
+            if fallback and not force:
                 logger.warning(
                     "Front photo generation failed; reusing previous illustration for org=%s",
                     organization_id,
@@ -361,6 +366,39 @@ class ReportService:
             self.db.commit()
             return report.illustration_url
         return url
+
+    def _clear_today_front_photo(
+        self,
+        organization_id: UUID,
+        today: str,
+        report_id: UUID | None,
+        illus: ReportIllustrationService,
+    ) -> None:
+        path = illus.front_cache_path(organization_id, today)
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to clear front photo cache %s: %s", path, exc)
+
+        if report_id is None:
+            return
+        report = self.db.scalar(
+            select(DailyReport).where(
+                DailyReport.id == report_id,
+                DailyReport.organization_id == organization_id,
+            )
+        )
+        if not report:
+            return
+        report.illustration_url = None
+        self.db.commit()
+        try:
+            report_path = illus.reports_dir / f"{report_id}.png"
+            if report_path.is_file():
+                report_path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to clear report illustration %s: %s", report_id, exc)
 
     def _fallback_illustration_url(
         self,

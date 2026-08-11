@@ -28,7 +28,8 @@ from app.services.post_service import PostService
 from app.services.personalization_service import ReviewQueueService
 from app.services.report_service import ReportService
 from app.services.weather_service import WeatherService
-from app.core.exceptions import BadRequestError, ServiceUnavailableError
+from app.core.exceptions import BadRequestError, ForbiddenError, ServiceUnavailableError
+from app.core.permissions import ADMIN_ROLES
 
 router = APIRouter()
 
@@ -245,6 +246,8 @@ def ensure_front_photo(
     db: Session = Depends(get_db),
 ):
     """Generate (or return cached) Gemini newspaper illustration for the front page."""
+    if body.force and user.role not in ADMIN_ROLES:
+        raise ForbiddenError("이미지 재생성은 관리자만 가능합니다.")
     if not body.report_id and not (body.title or "").strip():
         raise BadRequestError("report_id 또는 title이 필요합니다.")
     url = ReportService(db).ensure_front_photo(
@@ -253,6 +256,7 @@ def ensure_front_photo(
         title=body.title,
         summary=body.summary,
         seed=body.seed,
+        force=body.force,
     )
     return FrontPhotoResponse(illustration_url=url)
 
