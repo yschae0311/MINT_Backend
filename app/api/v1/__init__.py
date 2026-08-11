@@ -11,6 +11,7 @@ from app.api.v1 import (
     health,
     inquiries,
     jobs,
+    media_files,
     personalization,
     posts,
     reports,
@@ -37,3 +38,4 @@ api_router.include_router(search.router, prefix="/search", tags=["search"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(personalization.router, tags=["personalization"])
 api_router.include_router(tts.router, prefix="/tts", tags=["tts"])
+api_router.include_router(media_files.router, prefix="/files", tags=["media"])

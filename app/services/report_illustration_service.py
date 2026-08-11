@@ -18,7 +18,6 @@ _DEAD_IMAGE_MODELS = {
     "imagen-3.0-generate-002",
 }
 
-# Prefer known-good ids first; env primary is inserted unless dead.
 _IMAGE_MODEL_FALLBACKS = (
     "gemini-2.5-flash-image",
     "gemini-2.5-flash-image-preview",
@@ -50,7 +49,6 @@ class ReportIllustrationService:
             if not name or name in _DEAD_IMAGE_MODELS or name in ordered:
                 continue
             ordered.append(name)
-        # Keep configured primary first when it is still valid.
         if primary and primary not in _DEAD_IMAGE_MODELS:
             ordered = [primary, *[m for m in ordered if m != primary]]
         return ordered
@@ -132,12 +130,6 @@ class ReportIllustrationService:
                     return None
         return None
 
-    def save_for_report(self, report_id: UUID, image_bytes: bytes) -> str:
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
-        path = self.reports_dir / f"{report_id}.png"
-        path.write_bytes(image_bytes)
-        return f"{self.settings.media_url_prefix.rstrip('/')}/reports/{report_id}.png"
-
     def front_cache_path(self, organization_id: UUID, cache_key: str) -> Path:
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in cache_key)[:80]
         return self.media_root / "front" / str(organization_id) / f"{safe}.png"
@@ -155,10 +147,30 @@ class ReportIllustrationService:
         path = self.front_cache_path(organization_id, cache_key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(image_bytes)
-        return (
+        url = (
             f"{self.settings.media_url_prefix.rstrip('/')}"
             f"/front/{organization_id}/{path.name}"
         )
+        logger.info(
+            "Saved front illustration path=%s bytes=%s url=%s",
+            path.resolve(),
+            len(image_bytes),
+            url,
+        )
+        return url
+
+    def save_for_report(self, report_id: UUID, image_bytes: bytes) -> str:
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        path = self.reports_dir / f"{report_id}.png"
+        path.write_bytes(image_bytes)
+        url = f"{self.settings.media_url_prefix.rstrip('/')}/reports/{report_id}.png"
+        logger.info(
+            "Saved report illustration path=%s bytes=%s url=%s",
+            path.resolve(),
+            len(image_bytes),
+            url,
+        )
+        return url
 
     def latest_front_cache(self, organization_id: UUID) -> str | None:
         folder = self.media_root / "front" / str(organization_id)
