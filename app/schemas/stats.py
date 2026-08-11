@@ -1,6 +1,7 @@
 from datetime import datetime
+from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.enums import BoardType, Importance, PostStatus
 
@@ -48,3 +49,14 @@ class DashboardStatsResponse(BaseModel):
     trusted_preview: list[DashboardPostPreview]
     discovery_preview: list[DashboardPostPreview]
     community_voices_preview: list[DashboardPostPreview] = []
+
+
+class FrontPhotoRequest(BaseModel):
+    report_id: UUID | None = None
+    title: str | None = Field(default=None, max_length=300)
+    summary: str | None = Field(default=None, max_length=800)
+    seed: str | None = Field(default=None, max_length=120)
+
+
+class FrontPhotoResponse(BaseModel):
+    illustration_url: str

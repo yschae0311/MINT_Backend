@@ -18,11 +18,15 @@ from app.schemas.stats import (
     DashboardPostPreview,
     DashboardReportHighlight,
     DashboardStatsResponse,
+    FrontPhotoRequest,
+    FrontPhotoResponse,
 )
 from app.search.post_content import get_post_content, legacy_pg_content_enabled, mget_post_contents, pg_ai_summary_placeholder
 from app.services.org_settings_service import OrgSettingsService
 from app.services.post_service import PostService
 from app.services.personalization_service import ReviewQueueService
+from app.services.report_service import ReportService
+from app.core.exceptions import BadRequestError
 
 router = APIRouter()
 
@@ -230,3 +234,22 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
             limit=6,
         ),
     )
+
+
+@router.post("/front-photo", response_model=FrontPhotoResponse)
+def ensure_front_photo(
+    body: FrontPhotoRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Generate (or return cached) Gemini newspaper illustration for the front page."""
+    if not body.report_id and not (body.title or "").strip():
+        raise BadRequestError("report_id 또는 title이 필요합니다.")
+    url = ReportService(db).ensure_front_photo(
+        user.organization_id,
+        report_id=body.report_id,
+        title=body.title,
+        summary=body.summary,
+        seed=body.seed,
+    )
+    return FrontPhotoResponse(illustration_url=url)

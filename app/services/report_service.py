@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from datetime import date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -233,6 +234,143 @@ class ReportService:
                 report.illustration_url = illus.save_for_report(report.id, image_bytes)
         except Exception as exc:
             logger.warning("Report illustration skipped for %s: %s", report.id, exc)
+
+    def ensure_illustration(self, report_id: UUID, organization_id: UUID) -> str:
+        """Generate and persist a newspaper sketch if the report has none yet."""
+        report = self.db.scalar(
+            select(DailyReport).where(
+                DailyReport.id == report_id,
+                DailyReport.organization_id == organization_id,
+            )
+        )
+        if not report:
+            raise NotFoundError("Report not found")
+        if report.illustration_url:
+            return report.illustration_url
+
+        settings = get_settings()
+        if not settings.report_illustration_enabled or not settings.gemini_api_key.strip():
+            raise BadRequestError("일러스트 생성이 비활성화되어 있거나 API 키가 없습니다.")
+
+        highlights = report.key_changes if isinstance(report.key_changes, list) else []
+        client = get_llm_client()
+        try:
+            scene = client.generate_report_illustration_scene(
+                report.summary or report.title,
+                highlights if isinstance(highlights, list) else [],
+                report.report_date,
+            )
+        except Exception:
+            scene = (
+                f"Electric vehicle industry metaphor for daily briefing titled "
+                f"'{report.title[:120]}'"
+            )
+
+        illus = ReportIllustrationService()
+        image_bytes = illus.generate_image_bytes(scene)
+        if not image_bytes:
+            raise BadRequestError("이미지 생성에 실패했습니다.")
+
+        report.illustration_url = illus.save_for_report(report.id, image_bytes)
+        self.db.commit()
+        return report.illustration_url
+
+    def ensure_front_photo(
+        self,
+        organization_id: UUID,
+        *,
+        report_id: UUID | None = None,
+        title: str | None = None,
+        summary: str | None = None,
+        seed: str | None = None,
+    ) -> str:
+        """Return today's front-page illustration (generate at most once per KST day)."""
+        _ = seed  # retained for API compat; daily cache is date-keyed
+        settings = get_settings()
+        if not settings.report_illustration_enabled or not settings.gemini_api_key.strip():
+            raise BadRequestError("일러스트 생성이 비활성화되어 있거나 API 키가 없습니다.")
+
+        today = datetime.now(KST).date().isoformat()
+        illus = ReportIllustrationService()
+        cached = illus.read_front_cache(organization_id, today)
+        if cached:
+            self._link_report_illustration(report_id, organization_id, cached)
+            return cached
+
+        report = None
+        if report_id is not None:
+            report = self.db.scalar(
+                select(DailyReport).where(
+                    DailyReport.id == report_id,
+                    DailyReport.organization_id == organization_id,
+                )
+            )
+            if report and report.illustration_url:
+                # Reuse existing report art for today without regenerating.
+                try:
+                    src = Path(settings.media_root) / report.illustration_url.lstrip("/").removeprefix(
+                        settings.media_url_prefix.lstrip("/") + "/"
+                    )
+                    if not src.is_file():
+                        # illustration_url is like /media/reports/uuid.png
+                        rel = report.illustration_url
+                        if rel.startswith(settings.media_url_prefix):
+                            rel = rel[len(settings.media_url_prefix) :].lstrip("/")
+                        src = Path(settings.media_root) / rel
+                    if src.is_file():
+                        return illus.save_front_cache(organization_id, today, src.read_bytes())
+                except OSError:
+                    pass
+                return report.illustration_url
+
+        headline = (title or (report.title if report else "") or "").strip() or "EV industry daily briefing"
+        blurb = (summary or (report.summary if report else "") or "").strip()
+        scene = (
+            f"Metaphorical editorial scene for EV / charging news headline: {headline[:160]}. "
+            f"{blurb[:180]}"
+        ).strip()
+
+        if report:
+            highlights = report.key_changes if isinstance(report.key_changes, list) else []
+            client = get_llm_client()
+            try:
+                scene = client.generate_report_illustration_scene(
+                    report.summary or report.title,
+                    highlights if isinstance(highlights, list) else [],
+                    report.report_date,
+                )
+            except Exception:
+                pass
+
+        image_bytes = illus.generate_image_bytes(scene)
+        if not image_bytes:
+            raise BadRequestError("이미지 생성에 실패했습니다.")
+
+        url = illus.save_front_cache(organization_id, today, image_bytes)
+        if report:
+            # Keep a report-scoped copy too so report detail stays self-contained.
+            report.illustration_url = illus.save_for_report(report.id, image_bytes)
+            self.db.commit()
+            return report.illustration_url
+        return url
+
+    def _link_report_illustration(
+        self,
+        report_id: UUID | None,
+        organization_id: UUID,
+        illustration_url: str,
+    ) -> None:
+        if report_id is None:
+            return
+        report = self.db.scalar(
+            select(DailyReport).where(
+                DailyReport.id == report_id,
+                DailyReport.organization_id == organization_id,
+            )
+        )
+        if report and not report.illustration_url:
+            report.illustration_url = illustration_url
+            self.db.commit()
 
     def _normalize_report_result(self, result: dict, target: date) -> dict:
         recs = result.get("recommendations") or result.get("key_changes") or []

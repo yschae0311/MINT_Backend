@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_summary_model: str = "gemini-2.5-flash-lite"
     gemini_report_model: str = "gemini-2.5-flash"
-    gemini_image_model: str = "gemini-2.0-flash-preview-image-generation"
+    gemini_image_model: str = "gemini-2.5-flash-image"
     report_illustration_enabled: bool = True
     personalization_enabled: bool = False
     classification_confidence_threshold: float = 0.6
