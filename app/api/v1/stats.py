@@ -212,14 +212,14 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
         total_sources=total_sources,
         discovery_pending_retention_days=OrgSettingsService(db).discovery_pending_retention_days(org_id),
         latest_report=latest_report,
-        trusted_preview=_recent_posts(db, org_id, board_type=BoardType.trusted, limit=8),
+        trusted_preview=_recent_posts(db, org_id, board_type=BoardType.trusted, limit=14),
         discovery_preview=_recent_posts(
             db,
             org_id,
             board_type=BoardType.discovery,
             status=PostStatus.pending,
             exclude_community=True,
-            limit=4,
+            limit=6,
         ),
         community_voices_preview=_recent_posts(
             db,
@@ -227,6 +227,6 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
             board_type=BoardType.discovery,
             status=PostStatus.published,
             community_only=True,
-            limit=5,
+            limit=6,
         ),
     )

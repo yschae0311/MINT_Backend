@@ -105,6 +105,16 @@ class NewsPage(BaseModel):
     pages: int
 
 
+class TopicHubRead(BaseModel):
+    keyword: KeywordRead
+    category_name: str | None = None
+    exact_posts: list[NewsItem]
+    related_posts: list[NewsItem]
+    sibling_keywords: list[KeywordRead]
+    exact_count: int
+    exact_is_sparse: bool
+
+
 class PersonalReportItemRead(BaseModel):
     post: NewsItem
     rank: int

@@ -12,9 +12,16 @@ MotrexEV Intelligence & News Tracker API (FastAPI).
 | Sources | CRUD for RSS/HTML/Reddit/gov/community feeds |
 | Posts | Trusted & discovery boards, AI summary on posts |
 | Reports | Daily digest generation & PDF export |
+| Personalization | Category/keyword subscriptions, personal feed, topic hubs (`PERSONALIZATION_ENABLED`) |
 | Slack | Webhook settings & notification dispatch |
 | Jobs | Background crawl/summary tasks (Celery + Beat) |
 | Search / Chat / Stats | Full-text search, Gemini chat, dashboard stats |
+
+Optional one-time keyword backfill after raising per-post link depth:
+
+```bash
+python3 scripts/backfill_recent_classification.py --limit 500
+```
 
 ## Quick start
 

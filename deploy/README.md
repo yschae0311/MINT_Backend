@@ -7,7 +7,7 @@ sudo apt update
 sudo apt install -y python3.12 python3.12-venv
 
 cd ~/MINT_Backend
-cp .env.example .env   # DATABASE_URL, REDIS_URL, GEMINI_API_KEY, JWT_SECRET_KEY, CORS_ORIGINS, FRONTEND_URL
+cp .env.example .env   # DATABASE_URL, REDIS_URL, GEMINI_API_KEY, JWT_SECRET_KEY, CORS_ORIGINS, FRONTEND_URL, PERSONALIZATION_ENABLED
 PYTHON=python3.12 ./scripts/setup.sh
 ```
 

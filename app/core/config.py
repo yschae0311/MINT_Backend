@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     personalization_enabled: bool = False
     classification_confidence_threshold: float = 0.6
 
+    # Gemini TTS (server narration). Browser SpeechSynthesis is the frontend fallback.
+    tts_enabled: bool = True
+    gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
+    gemini_tts_voice: str = "Kore"
+
     translate_titles_on_crawl: bool = True
 
     media_root: str = "uploads"

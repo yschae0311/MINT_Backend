@@ -39,12 +39,14 @@ from app.models.post import Post
 from app.models.source import Source
 from app.models.user import User
 from app.schemas.personalization import (
+    KeywordRead,
     MatchedKeyword,
     NewsItem,
     NewsPage,
     PersonalReportItemRead,
     PersonalReportRead,
     ReviewQueueRead,
+    TopicHubRead,
 )
 from app.search.post_content import PostContent, get_post_content, mget_post_contents, legacy_pg_content_enabled, sync_post_metadata
 from app.search.post_search_query import PostSearchFilters, load_posts_ordered, search_posts
@@ -54,7 +56,8 @@ from app.services.llm_client import get_llm_client
 KST = ZoneInfo("Asia/Seoul")
 _KEYWORD_AUTO_ACTIVE_MIN = 0.6
 _MIN_NEW_KEYWORD_CONFIDENCE = 0.72
-_MAX_KEYWORDS_PER_POST = 3
+_MAX_KEYWORDS_PER_POST = 5
+_CUSTOM_KEYWORD_SCAN_DAYS = 90
 DEFAULT_CATEGORIES = (
     "정책/규제",
     "충전 인프라",
@@ -734,21 +737,33 @@ class TaxonomyService:
         )
         if not subscribed:
             self.db.add(UserKeywordSubscription(user_id=user.id, keyword_id=keyword.id))
+        since = datetime.now(timezone.utc) - timedelta(days=_CUSTOM_KEYWORD_SCAN_DAYS)
         posts = self.db.scalars(
             select(Post)
-            .options(joinedload(Post.ai_outputs))
             .where(
                 Post.organization_id == user.organization_id,
                 Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+                Post.collected_at >= since,
             )
-        ).unique().all()
-        terms = [keyword.name, *(keyword.aliases or [])]
+            .order_by(Post.collected_at.desc())
+        ).all()
+        contents = mget_post_contents(self.db, [post.id for post in posts])
+        terms = [
+            normalize_keyword(term)
+            for term in [keyword.name, *(keyword.aliases or [])]
+            if normalize_keyword(term)
+        ]
         for post in posts:
-            blob = normalize_keyword(
-                f"{post.title} {post.raw_content} "
-                + " ".join(output.summary for output in post.ai_outputs if output.summary)
-            )
-            if not any(normalize_keyword(term) in blob for term in terms if normalize_keyword(term)):
+            content = contents.get(post.id)
+            body = ""
+            summary = ""
+            if content is not None:
+                body = content.body or ""
+                summary = content.summary or ""
+            if not body and not summary:
+                body = post.raw_content or ""
+            blob = normalize_keyword(f"{post.title} {body} {summary}")
+            if not any(term in blob for term in terms):
                 continue
             exists_link = self.db.scalar(
                 select(PostKeyword).where(
@@ -1638,6 +1653,97 @@ class PersonalizedNewsService:
             if chosen.source_name:
                 source_counts[chosen.source_name] += 1
         return ordered
+
+    def get_topic_hub(
+        self,
+        user: User,
+        keyword_id: UUID,
+        *,
+        exact_size: int = 20,
+        related_size: int = 12,
+        sparse_threshold: int = 3,
+    ) -> TopicHubRead:
+        taxonomy = TaxonomyService(self.db)
+        keyword = self.db.scalar(
+            select(Keyword).where(
+                Keyword.id == keyword_id,
+                Keyword.organization_id == user.organization_id,
+                Keyword.status.in_([KeywordStatus.active, KeywordStatus.candidate]),
+                or_(
+                    Keyword.scope == KeywordScope.organization,
+                    Keyword.owner_user_id == user.id,
+                ),
+            )
+        )
+        if not keyword:
+            raise NotFoundError("키워드를 찾을 수 없습니다.")
+
+        category = None
+        if keyword.category_id:
+            category = self.db.scalar(
+                select(NewsCategory).where(NewsCategory.id == keyword.category_id)
+            )
+
+        selected_ids = taxonomy.selected_ids(user.id)
+        exact_page = self.list_news(
+            user,
+            personalized=False,
+            keyword_ids=[keyword_id],
+            page=1,
+            size=exact_size,
+        )
+        exact_ids = {item.id for item in exact_page.items}
+        related_posts: list[NewsItem] = []
+        if category and category.name:
+            related_page = self.list_news(
+                user,
+                personalized=False,
+                category=category.name,
+                page=1,
+                size=related_size + len(exact_ids) + 8,
+            )
+            related_posts = [
+                item for item in related_page.items if item.id not in exact_ids
+            ][:related_size]
+
+        siblings: list[Keyword] = []
+        if keyword.category_id:
+            siblings = list(
+                self.db.scalars(
+                    select(Keyword)
+                    .where(
+                        Keyword.organization_id == user.organization_id,
+                        Keyword.category_id == keyword.category_id,
+                        Keyword.id != keyword.id,
+                        Keyword.is_curated.is_(True),
+                        Keyword.status.in_(
+                            [KeywordStatus.active, KeywordStatus.candidate]
+                        ),
+                        or_(
+                            Keyword.scope == KeywordScope.organization,
+                            Keyword.owner_user_id == user.id,
+                        ),
+                    )
+                    .order_by(Keyword.usage_count.desc(), Keyword.name.asc())
+                    .limit(12)
+                ).all()
+            )
+
+        def _kw_read(row: Keyword) -> KeywordRead:
+            data = KeywordRead.model_validate(row)
+            data.selected = row.id in selected_ids
+            data.category_name = category.name if category else None
+            return data
+
+        return TopicHubRead(
+            keyword=_kw_read(keyword),
+            category_name=category.name if category else None,
+            exact_posts=exact_page.items,
+            related_posts=related_posts,
+            sibling_keywords=[_kw_read(row) for row in siblings],
+            exact_count=exact_page.total,
+            exact_is_sparse=exact_page.total < sparse_threshold,
+        )
 
 
 class PersonalReportService:

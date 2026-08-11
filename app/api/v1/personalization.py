@@ -32,6 +32,7 @@ from app.schemas.personalization import (
     ReviewQueueKeywordsApplyResponse,
     ReviewQueueRead,
     ReviewQueueResolve,
+    TopicHubRead,
 )
 from app.schemas.report import ReportGenerateRequest
 from app.services.personalization_service import (
@@ -284,9 +285,22 @@ def update_my_keywords(
     db: Session = Depends(get_db),
 ):
     _require_personalization_enabled()
-    rows = TaxonomyService(db).set_subscriptions(user, data.keyword_ids)
+    service = TaxonomyService(db)
+    # Category-first ready gate: keyword-only users still need ≥3; with categories, ≥1 is enough.
+    minimum = 1 if service.selected_category_ids(user.id) else 3
+    rows = service.set_subscriptions(user, data.keyword_ids, minimum=minimum)
     selected = {row.id for row in rows}
     return [_keyword_read(row, selected) for row in rows]
+
+
+@router.get("/topics/{keyword_id}", response_model=TopicHubRead)
+def get_topic_hub(
+    keyword_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_personalization_enabled()
+    return PersonalizedNewsService(db).get_topic_hub(user, keyword_id)
 
 
 @router.post("/users/me/keywords/custom", response_model=KeywordRead, status_code=status.HTTP_201_CREATED)

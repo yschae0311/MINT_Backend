@@ -583,14 +583,16 @@ class CrawlerService:
                 return True, None, needs_review
             return False, "duplicate", False
 
+        use_es = get_settings().search_uses_elasticsearch
         post = Post(
             organization_id=source.organization_id,
             source_id=source.id,
             board_type=BoardType.discovery,
             title=stored_title[:512],
-            original_url=None if get_settings().search_uses_elasticsearch else (url or None),
+            original_url=None if use_es else (url or None),
             published_at=published_at,
-            raw_content="",
+            # ES mode stores body in the index; postgres keeps it on the row.
+            raw_content="" if use_es else (stored_body or ""),
             content_hash=content_hash,
             category=source.category,
             status=PostStatus.pending,
@@ -663,19 +665,18 @@ class CrawlerService:
         post.status = PostStatus.pending if needs_review else PostStatus.published
         self.db.flush()
 
-        if use_es:
-            save_post_content(
-                self.db,
-                post,
-                original_url=content.original_url,
-                summary=content.summary,
-                impact=content.impact,
-                body=content.body,
-                action_items=content.action_items,
-                merge_existing=False,
-            )
-        elif original_url:
-            post.original_url = original_url
+        # Always persist via save_post_content: ES gets indexed body; postgres
+        # writes Post.raw_content / original_url (previously discovery PG body was dropped).
+        save_post_content(
+            self.db,
+            post,
+            original_url=content.original_url,
+            summary=content.summary,
+            impact=content.impact,
+            body=content.body,
+            action_items=content.action_items,
+            merge_existing=False,
+        )
 
         return needs_review
 
