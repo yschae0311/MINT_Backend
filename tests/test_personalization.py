@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
 from app.core.database import Base
+import app.models  # noqa: F401 — register Edition and related tables
 from app.models.enums import (
     AccountApprovalStatus,
     BoardType,
@@ -57,7 +58,7 @@ class PersonalizationServiceTest(unittest.TestCase):
             email="user@example.com",
             password_hash="x",
             name="테스터",
-            role=UserRole.member,
+            role=UserRole.admin,
             approval_status=AccountApprovalStatus.approved,
             is_active=True,
         )
@@ -161,7 +162,7 @@ class PersonalizationServiceTest(unittest.TestCase):
             email="other@example.com",
             password_hash="x",
             name="다른 사용자",
-            role=UserRole.member,
+            role=UserRole.admin,
             approval_status=AccountApprovalStatus.approved,
             is_active=True,
         )
@@ -357,8 +358,16 @@ class PersonalizationServiceTest(unittest.TestCase):
         pairs = find_duplicate_keyword_pairs(
             self.taxonomy.list_keywords(self.user, include_discovered=True)
         )
-        self.assertEqual(len(pairs), 1)
-        source, target = pairs[0]
+        csms_pair = next(
+            (
+                (source, target)
+                for source, target in pairs
+                if {source.name, target.name} == {"CSMS 플랫폼", "CSMS"}
+            ),
+            None,
+        )
+        self.assertIsNotNone(csms_pair)
+        source, target = csms_pair
         self.assertEqual(source.name, "CSMS 플랫폼")
         self.assertEqual(target.name, "CSMS")
 

@@ -112,6 +112,25 @@ TRUSTED_POLICY_SOURCE_SEEDS = (
     },
 )
 
+AUTONOMOUS_SOURCE_SEEDS = (
+    {
+        "name": "국토교통부 보도자료",
+        "url": "https://www.molit.go.kr/USR/NEWS/m_71/lst.jsp",
+        "source_type": SourceType.news_page,
+        "category": "자율주행 정책",
+        "reliability_score": 92,
+        "edition_slug": "autonomous",
+    },
+    {
+        "name": "Autonomous Vehicle International",
+        "url": "https://www.autonomousvehicleinternational.com/feed",
+        "source_type": SourceType.rss,
+        "category": "자율주행 기술",
+        "reliability_score": 80,
+        "edition_slug": "autonomous",
+    },
+)
+
 # 구 환경부(me.go.kr) HTML 소스 → 기후에너지환경부(mcee.go.kr) 마이그레이션
 MCEE_SOURCE_MIGRATIONS = (
     {
@@ -259,8 +278,33 @@ def seed_defaults(db: Session) -> None:
 
     _seed_sources(db, org.id, COMMUNITY_SOURCE_SEEDS, low_trust=True)
     _seed_sources(db, org.id, TRUSTED_POLICY_SOURCE_SEEDS, low_trust=False)
+    _seed_sources(db, org.id, AUTONOMOUS_SOURCE_SEEDS, low_trust=False)
 
     from app.services.personalization_service import TaxonomyService
+    from app.services.edition_service import AUTONOMOUS_SLUG, EV_SLUG
 
     TaxonomyService(db).ensure_defaults(org.id)
+    _tag_seed_sources(db, org.id)
     db.commit()
+
+
+def _tag_seed_sources(db: Session, organization_id) -> None:
+    from app.models.edition import Edition, SourceEdition
+    from app.services.edition_service import AUTONOMOUS_SLUG, EV_SLUG
+
+    editions = {
+        row.slug: row
+        for row in db.scalars(select(Edition).where(Edition.organization_id == organization_id)).all()
+    }
+    ev = editions.get(EV_SLUG)
+    av = editions.get(AUTONOMOUS_SLUG)
+    av_urls = {seed["url"] for seed in AUTONOMOUS_SOURCE_SEEDS}
+    sources = db.scalars(select(Source).where(Source.organization_id == organization_id)).all()
+    for source in sources:
+        exists = db.scalar(select(SourceEdition).where(SourceEdition.source_id == source.id))
+        if exists:
+            continue
+        target = av if source.url in av_urls else ev
+        if not target:
+            continue
+        db.add(SourceEdition(source_id=source.id, edition_id=target.id))

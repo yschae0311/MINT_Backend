@@ -237,6 +237,42 @@ class PostService:
         self.db.commit()
         return len(posts)
 
+    def purge_stale_published(
+        self,
+        organization_id: UUID,
+        *,
+        retention_days: int | None = None,
+    ) -> int:
+        days = retention_days if retention_days is not None else get_settings().post_retention_days
+        if days <= 0:
+            return 0
+
+        from app.models.daily_report import DailyReportItem
+        from app.models.personalization import PersonalReportItem
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        kept_ids = set(
+            self.db.scalars(select(DailyReportItem.post_id)).all()
+        ) | set(self.db.scalars(select(PersonalReportItem.post_id)).all())
+        q = select(Post).where(
+            Post.organization_id == organization_id,
+            Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+            Post.collected_at < cutoff,
+        )
+        posts = list(self.db.scalars(q).all())
+        now = datetime.now(timezone.utc)
+        count = 0
+        for post in posts:
+            if post.id in kept_ids:
+                continue
+            post.status = PostStatus.deleted
+            post.reviewed_at = now
+            delete_post_index(self.db, post.id)
+            count += 1
+        if count:
+            self.db.commit()
+        return count
+
     def pending_count(self, organization_id: UUID) -> int:
         return (
             self.db.scalar(

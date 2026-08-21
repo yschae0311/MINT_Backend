@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from app.core.database import SessionLocal
+from app.core.config import get_settings
 from app.models.enums import AccountApprovalStatus, JobType, PostStatus, SourceType
 from app.models.organization import Organization
 from app.models.post import Post
@@ -255,7 +256,12 @@ def crawl_all_discovery_job_task(
 
 
 @celery_app.task(name="app.workers.tasks.generate_report_job_task")
-def generate_report_job_task(job_id: str, organization_id: str, report_date: str | None = None):
+def generate_report_job_task(
+    job_id: str,
+    organization_id: str,
+    report_date: str | None = None,
+    edition_id: str | None = None,
+):
     db = SessionLocal()
     try:
         jobs = JobService(db)
@@ -264,15 +270,29 @@ def generate_report_job_task(job_id: str, organization_id: str, report_date: str
             return
         jobs.update_progress(UUID(job_id), 0, 1, "리포트 생성 중…")
         target = date.fromisoformat(report_date) if report_date else _kst_today()
-        report = ReportService(db).generate(
-            UUID(organization_id),
-            target,
-            prefer_yesterday=False,
-            allow_empty=True,
-        )
+        from app.services.edition_service import EditionService
+        from app.services.personalization_service import TaxonomyService
+
+        TaxonomyService(db).ensure_defaults(UUID(organization_id))
+        db.commit()
+        edition_svc = EditionService(db)
+        if edition_id:
+            editions = [edition_svc.get(UUID(edition_id), UUID(organization_id))]
+        else:
+            editions = edition_svc.list_editions(UUID(organization_id), active_only=True)
+        dates = []
+        for edition in editions or [None]:
+            report = ReportService(db).generate(
+                UUID(organization_id),
+                target,
+                prefer_yesterday=False,
+                allow_empty=True,
+                edition_id=edition.id if edition else None,
+            )
+            dates.append(str(report.report_date))
         if jobs.is_cancelled(UUID(job_id)):
             return
-        jobs.complete_job(UUID(job_id), f"리포트 생성 완료 ({report.report_date})")
+        jobs.complete_job(UUID(job_id), f"리포트 생성 완료 ({', '.join(dates) or target})")
     except Exception as exc:
         logger.exception("generate_report_job_task failed job=%s", job_id)
         JobService(db).fail_job(UUID(job_id), str(exc))
@@ -347,6 +367,27 @@ def purge_stale_discovery_posts_task(retention_days: int | None = None):
             except Exception as exc:
                 logger.exception("purge_stale_discovery org=%s failed", org.id)
                 jobs.fail_job(job.id, str(exc))
+
+            published_days = get_settings().post_retention_days
+            if published_days > 0:
+                pub_job = jobs.create_job(
+                    org.id,
+                    JobType.purge_stale_published,
+                    f"만료 기사 정리 ({published_days}일 초과)",
+                    progress_total=1,
+                )
+                db.commit()
+                try:
+                    jobs.start_job(pub_job.id)
+                    pub_count = PostService(db).purge_stale_published(
+                        org.id, retention_days=published_days
+                    )
+                    jobs.complete_job(pub_job.id, f"삭제 {pub_count}건")
+                    if pub_count:
+                        logger.info("purge_stale_published org=%s deleted=%s", org.id, pub_count)
+                except Exception as exc:
+                    logger.exception("purge_stale_published org=%s failed", org.id)
+                    jobs.fail_job(pub_job.id, str(exc))
     finally:
         db.close()
 
@@ -573,8 +614,18 @@ def generate_daily_report_task(report_date: str | None = None):
             try:
                 jobs.start_job(job.id)
                 jobs.update_progress(job.id, 0, 1, "리포트 생성 중…")
-                report = ReportService(db).generate(org.id, target, allow_empty=True)
-                jobs.complete_job(job.id, f"리포트 생성 완료 ({report.report_date})")
+                from app.services.edition_service import EditionService
+                from app.services.personalization_service import TaxonomyService
+
+                TaxonomyService(db).ensure_defaults(org.id)
+                db.commit()
+                names = []
+                for edition in EditionService(db).list_editions(org.id, active_only=True):
+                    report = ReportService(db).generate(
+                        org.id, target, allow_empty=True, edition_id=edition.id
+                    )
+                    names.append(f"{edition.slug}:{report.report_date}")
+                jobs.complete_job(job.id, f"리포트 생성 완료 ({', '.join(names) or target})")
             except Exception as exc:
                 logger.warning("generate_daily_report org=%s date=%s failed: %s", org.id, target, exc)
                 jobs.fail_job(job.id, str(exc))

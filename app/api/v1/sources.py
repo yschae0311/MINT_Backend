@@ -5,11 +5,12 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.exceptions import NotFoundError
-from app.core.permissions import require_admin
+from app.core.permissions import require_admin, require_edition_editor_any
 from app.core.security import get_current_user
 from app.models.enums import JobType
 from app.models.source import Source
 from app.models.user import User
+from app.services.membership_service import MembershipService
 from app.schemas.job import JobRead
 from app.schemas.source import (
     CollectionSettingsRead,
@@ -52,22 +53,23 @@ def update_collection_settings(
 
 @router.get("", response_model=list[SourceRead])
 def list_sources(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return SourceService(db).list_sources(user.organization_id)
+    return SourceService(db).list_sources(user.organization_id, user=user)
 
 
 @router.post("", response_model=SourceRead)
 def create_source(
     data: SourceCreate,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
+    data.edition_ids = MembershipService(db).constrain_source_edition_ids(user, data.edition_ids)
     return SourceService(db).create_source(user.organization_id, data)
 
 
 @router.post("/submit-url", response_model=CommunityUrlSubmitResult)
 def submit_community_url(
     data: CommunityUrlSubmit,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
     accepted, reason = CrawlerService(db).submit_community_url(
@@ -130,37 +132,48 @@ def get_source(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return SourceService(db).get_source(source_id, user.organization_id)
+    return SourceService(db).get_source(source_id, user.organization_id, user=user)
 
 
 @router.patch("/{source_id}", response_model=SourceRead)
 def update_source(
     source_id: UUID,
     data: SourceUpdate,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
+    source = db.get(Source, source_id)
+    if not source:
+        raise NotFoundError("Source not found")
+    MembershipService(db).assert_source_editable(user, source)
+    if data.edition_ids is not None:
+        data.edition_ids = MembershipService(db).constrain_source_edition_ids(user, data.edition_ids)
     return SourceService(db).update_source(source_id, user.organization_id, data)
 
 
 @router.delete("/{source_id}", status_code=204)
 def delete_source(
     source_id: UUID,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
+    source = db.get(Source, source_id)
+    if not source:
+        raise NotFoundError("Source not found")
+    MembershipService(db).assert_source_editable(user, source)
     SourceService(db).delete_source(source_id, user.organization_id)
 
 
 @router.post("/{source_id}/crawl", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
 def crawl_source(
     source_id: UUID,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
     source = db.get(Source, source_id)
     if not source or source.organization_id != user.organization_id:
         raise NotFoundError("Source not found")
+    MembershipService(db).assert_source_editable(user, source)
     jobs = JobService(db)
     jobs.require_idle(user.organization_id)
     job = jobs.create_job(
@@ -189,12 +202,13 @@ def crawl_source(
 )
 def crawl_source_to_discovery(
     source_id: UUID,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
     source = db.get(Source, source_id)
     if not source or source.organization_id != user.organization_id:
         raise NotFoundError("Source not found")
+    MembershipService(db).assert_source_editable(user, source)
     jobs = JobService(db)
     jobs.require_idle(user.organization_id)
     estimated = estimate_discovery_candidates_per_source(source)

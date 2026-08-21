@@ -99,6 +99,7 @@ class JobType(str, enum.Enum):
     send_slack_report = "send_slack_report"
     summarize_post = "summarize_post"
     purge_stale_discovery = "purge_stale_discovery"
+    purge_stale_published = "purge_stale_published"
     classify_posts = "classify_posts"
     generate_personal_reports = "generate_personal_reports"
 

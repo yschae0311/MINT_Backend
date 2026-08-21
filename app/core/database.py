@@ -69,6 +69,55 @@ def _migrate_pg_columns() -> None:
         )
         conn.execute(
             text(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{_schema}".editions (
+                    id UUID PRIMARY KEY,
+                    organization_id UUID NOT NULL REFERENCES "{_schema}".organizations(id),
+                    slug VARCHAR(64) NOT NULL,
+                    name VARCHAR(128) NOT NULL,
+                    sort_order INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT true,
+                    topic_terms JSONB,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (organization_id, slug)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_editions_organization_id '
+                f'ON "{_schema}".editions (organization_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{_schema}".source_editions (
+                    id UUID PRIMARY KEY,
+                    source_id UUID NOT NULL REFERENCES "{_schema}".sources(id) ON DELETE CASCADE,
+                    edition_id UUID NOT NULL REFERENCES "{_schema}".editions(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (source_id, edition_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_source_editions_source_id '
+                f'ON "{_schema}".source_editions (source_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_source_editions_edition_id '
+                f'ON "{_schema}".source_editions (edition_id)'
+            )
+        )
+        conn.execute(
+            text(
                 f'ALTER TABLE "{_schema}".users '
                 "ADD COLUMN IF NOT EXISTS approval_status VARCHAR(16) DEFAULT 'approved'"
             )
@@ -110,6 +159,98 @@ def _migrate_pg_columns() -> None:
                 "ADD COLUMN IF NOT EXISTS is_featured BOOLEAN NOT NULL DEFAULT true"
             )
         )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".news_categories '
+                "ADD COLUMN IF NOT EXISTS edition_id UUID"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".keywords '
+                "ADD COLUMN IF NOT EXISTS is_featured BOOLEAN NOT NULL DEFAULT false"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".keywords '
+                "ADD COLUMN IF NOT EXISTS edition_id UUID"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".daily_reports '
+                "ADD COLUMN IF NOT EXISTS edition_id UUID"
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_news_categories_edition_id '
+                f'ON "{_schema}".news_categories (edition_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_keywords_edition_id '
+                f'ON "{_schema}".keywords (edition_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_daily_reports_edition_id '
+                f'ON "{_schema}".daily_reports (edition_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".users '
+                "ADD COLUMN IF NOT EXISTS keycloak_sub VARCHAR(128)"
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE UNIQUE INDEX IF NOT EXISTS ix_users_keycloak_sub '
+                f'ON "{_schema}".users (keycloak_sub)'
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{_schema}".users '
+                "ALTER COLUMN password_hash DROP NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS "{_schema}".user_editions (
+                    id UUID PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES "{_schema}".users(id) ON DELETE CASCADE,
+                    edition_id UUID NOT NULL REFERENCES "{_schema}".editions(id) ON DELETE CASCADE,
+                    is_editor BOOLEAN NOT NULL DEFAULT false,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (user_id, edition_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_user_editions_user_id '
+                f'ON "{_schema}".user_editions (user_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS ix_user_editions_edition_id '
+                f'ON "{_schema}".user_editions (edition_id)'
+            )
+        )
+        conn.execute(
+            text(
+                f'CREATE UNIQUE INDEX IF NOT EXISTS uq_user_editions_one_editor '
+                f'ON "{_schema}".user_editions (edition_id) WHERE is_editor IS TRUE'
+            )
+        )
     logger.debug('Ensured background_jobs.status column width')
 
 
@@ -135,6 +276,22 @@ def _migrate_sqlite_columns() -> None:
                     )
                 )
             logger.info("Added users.approval_status column (sqlite)")
+
+    def _add_sqlite_col(table: str, column: str, ddl: str) -> None:
+        if table not in inspector.get_table_names():
+            return
+        cols = {c["name"] for c in inspector.get_columns(table)}
+        if column in cols:
+            return
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+        logger.info("Added %s.%s column (sqlite)", table, column)
+
+    _add_sqlite_col("news_categories", "edition_id", "edition_id CHAR(32)")
+    _add_sqlite_col("keywords", "is_featured", "is_featured BOOLEAN NOT NULL DEFAULT 0")
+    _add_sqlite_col("keywords", "edition_id", "edition_id CHAR(32)")
+    _add_sqlite_col("daily_reports", "edition_id", "edition_id CHAR(32)")
+    _add_sqlite_col("users", "keycloak_sub", "keycloak_sub VARCHAR(128)")
 
 
 def init_db() -> None:

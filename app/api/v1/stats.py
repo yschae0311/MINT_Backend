@@ -30,6 +30,7 @@ from app.services.report_service import ReportService
 from app.services.weather_service import WeatherService
 from app.core.exceptions import BadRequestError, ForbiddenError, ServiceUnavailableError
 from app.core.permissions import ADMIN_ROLES
+from app.services.membership_service import MembershipService
 
 router = APIRouter()
 
@@ -93,7 +94,9 @@ def _recent_posts(
         elif exclude_community:
             q = q.where(Source.source_type.not_in(_COMMUNITY_SOURCE_TYPES))
     from app.services.ev_display_filter import is_ev_related_post
+    from app.services.topic_gate import load_topic_terms
 
+    extra_terms = load_topic_terms(db, org_id)
     # Over-fetch then filter so dashboard previews stay EV-focused after legacy junk.
     candidates = db.scalars(q.order_by(Post.collected_at.desc()).limit(limit * 8)).unique().all()
     contents = mget_post_contents(db, [post.id for post in candidates])
@@ -103,7 +106,7 @@ def _recent_posts(
         content = contents.get(post.id)
         if content is not None:
             body = (content.body or content.summary or "")[:4000]
-        if is_ev_related_post(post, body=body):
+        if is_ev_related_post(post, body=body, extra_terms=extra_terms):
             filtered.append(post)
         if len(filtered) >= limit:
             break
@@ -156,7 +159,7 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
     )
 
     pending_discovery = PostService(db).pending_count(org_id)
-    review_queue_pending = ReviewQueueService(db).pending_count(org_id)
+    review_queue_pending = ReviewQueueService(db).pending_count(org_id, user=user)
 
     active_sources = (
         db.scalar(
@@ -170,12 +173,21 @@ def dashboard_stats(user: User = Depends(get_current_user), db: Session = Depend
         db.scalar(select(func.count()).select_from(Source).where(Source.organization_id == org_id)) or 0
     )
 
-    latest_report_row = db.scalar(
-        select(DailyReport)
-        .where(DailyReport.organization_id == org_id)
-        .order_by(DailyReport.report_date.desc())
-        .limit(1)
-    )
+    visible = MembershipService(db).visible_edition_ids(user)
+    latest_q = select(DailyReport).where(DailyReport.organization_id == org_id)
+    if visible is not None:
+        if not visible:
+            latest_report_row = None
+        else:
+            latest_report_row = db.scalar(
+                latest_q.where(DailyReport.edition_id.in_(visible))
+                .order_by(DailyReport.report_date.desc())
+                .limit(1)
+            )
+    else:
+        latest_report_row = db.scalar(
+            latest_q.order_by(DailyReport.report_date.desc()).limit(1)
+        )
     latest_report = None
     if latest_report_row:
         highlights: list[DashboardReportHighlight] = []

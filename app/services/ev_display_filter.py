@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.ev_relevance import has_strong_ev_signal, is_obvious_junk
+from app.services.ev_relevance import has_strong_topic_signal, is_obvious_junk
 
 
-def is_ev_related_post(post: Any, *, body: str = "") -> bool:
+def is_ev_related_post(post: Any, *, body: str = "", extra_terms: list[str] | None = None) -> bool:
     """Return True if a stored post should appear on user-facing news/dashboard surfaces.
 
     Uses title + body (+ url) only. Taxonomy category names like "충전 인프라"
@@ -25,4 +25,4 @@ def is_ev_related_post(post: Any, *, body: str = "") -> bool:
     if is_obvious_junk(title, text, url):
         return False
 
-    return has_strong_ev_signal(title, text, url)
+    return has_strong_topic_signal(title, text, url, extra_terms)

@@ -22,6 +22,10 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+    id_token: str | None = Field(
+        default=None,
+        description="Keycloak ID token for RP-initiated logout. Not used as an API credential.",
+    )
 
 
 class RefreshRequest(BaseModel):
@@ -37,6 +41,30 @@ class RegisterResponse(BaseModel):
     status: str = "pending"
 
 
+class OidcLoginRequest(BaseModel):
+    access_token: str | None = None
+    code: str | None = None
+    redirect_uri: str | None = None
+    code_verifier: str | None = None
+    username: str | None = None
+    password: str | None = None
+
+
+class OidcConfigResponse(BaseModel):
+    configured: bool
+    issuer: str | None = None
+    client_id: str | None = None
+    authorization_endpoint: str | None = None
+    end_session_endpoint: str | None = None
+
+
+class UserEditionMembership(BaseModel):
+    id: UUID
+    name: str
+    slug: str
+    is_editor: bool = False
+
+
 class UserRead(ORMBase):
     id: UUID
     organization_id: UUID
@@ -45,3 +73,4 @@ class UserRead(ORMBase):
     role: UserRole
     approval_status: AccountApprovalStatus
     is_active: bool
+    editions: list[UserEditionMembership] = Field(default_factory=list)

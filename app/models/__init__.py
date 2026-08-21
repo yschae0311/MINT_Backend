@@ -3,6 +3,7 @@ from app.models.ai_output import AIOutput
 from app.models.daily_report import DailyReport, DailyReportItem
 from app.models.inquiry import Inquiry, InquiryMessage
 from app.models.notification_log import NotificationLog
+from app.models.edition import Edition, SourceEdition, UserEdition
 from app.models.organization import Organization
 from app.models.personalization import (
     Keyword,
@@ -24,6 +25,9 @@ from app.models.user import User
 
 __all__ = [
     "BackgroundJob",
+    "Edition",
+    "SourceEdition",
+    "UserEdition",
     "Organization",
     "User",
     "Source",

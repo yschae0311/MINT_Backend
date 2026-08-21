@@ -97,3 +97,11 @@ def test_display_filter_rejects_junk():
         raw_content="",
     )
     assert not is_ev_related_post(post)
+
+
+def test_keyword_gate_accepts_autonomous():
+    assert passes_keyword_gate(
+        "웨이모 로보택시 확대",
+        "자율주행 레벨4 운행 허가가 늘어난다.",
+        "https://example.com/av",
+    )

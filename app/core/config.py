@@ -1,10 +1,18 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+_ENV_FILE = _BACKEND_DIR / ".env"
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE if _ENV_FILE.is_file() else ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     app_name: str = "MINT"
     app_env: str = "development"
@@ -57,6 +65,9 @@ class Settings(BaseSettings):
 
     """AI 발견 게시판에서 검토 대기(pending) 상태로 남은 글을 soft-delete 하는 보관 일수. 0이면 비활성."""
     discovery_pending_retention_days: int = 14
+    """1면·뉴스 기본 표시 및 published 글 정리 일수. 0이면 표시 창/정리를 쓰지 않음."""
+    feed_window_days: int = 7
+    post_retention_days: int = 7
 
     # Reddit — 서버 IP에서 비인증 JSON/RSS는 403/429. OAuth 또는 RSS 토큰 중 하나 필요.
     reddit_client_id: str = ""
@@ -85,6 +96,15 @@ class Settings(BaseSettings):
     search_dual_log_diff: bool = False
     elasticsearch_text_analyzer: str = "nori"
     """auto: detect nori plugin | nori | standard"""
+
+    # Keycloak SSO — public client + PKCE. No client secret.
+    keycloak_issuer: str = ""
+    keycloak_client_id: str = ""
+    keycloak_admin_role: str = "mint-superadmin"
+
+    @property
+    def keycloak_configured(self) -> bool:
+        return bool(self.keycloak_issuer.strip() and self.keycloak_client_id.strip())
 
     @property
     def search_uses_elasticsearch(self) -> bool:

@@ -8,6 +8,7 @@ from app.models.enums import SourceType, TrustLevel
 from app.models.source import Source
 from app.schemas.source import SourceCreate, SourceRead, SourceUpdate
 from app.services.community_sources import is_community_source_type
+from app.services.edition_service import EditionService
 
 
 def _apply_community_defaults(data: dict) -> dict:
@@ -25,32 +26,44 @@ class SourceService:
     def __init__(self, db: Session):
         self.db = db
 
-    def list_sources(self, organization_id: UUID) -> list[SourceRead]:
+    def list_sources(self, organization_id: UUID, user=None) -> list[SourceRead]:
         sources = self.db.scalars(
             select(Source)
             .where(Source.organization_id == organization_id)
             .where(Source.name != "__community_submit__")
             .order_by(Source.name)
         ).all()
-        return [SourceRead.model_validate(s) for s in sources]
+        if user is None:
+            return [self._to_read(s) for s in sources]
+        from app.services.membership_service import MembershipService
 
-    def get_source(self, source_id: UUID, organization_id: UUID) -> SourceRead:
+        membership = MembershipService(self.db)
+        return [self._to_read(s) for s in sources if membership.source_visible(user, s)]
+
+    def get_source(self, source_id: UUID, organization_id: UUID, user=None) -> SourceRead:
         source = self._get_or_404(source_id, organization_id)
-        return SourceRead.model_validate(source)
+        if user is not None:
+            from app.services.membership_service import MembershipService
+
+            MembershipService(self.db).assert_source_visible(user, source)
+        return self._to_read(source)
 
     def create_source(self, organization_id: UUID, data: SourceCreate) -> SourceRead:
-        payload = data.model_dump()
+        payload = data.model_dump(exclude={"edition_ids"})
         if is_community_source_type(payload.get("source_type", SourceType.rss)):
             payload = _apply_community_defaults(payload)
         source = Source(organization_id=organization_id, **payload)
         self.db.add(source)
+        self.db.flush()
+        EditionService(self.db).set_source_editions(source, data.edition_ids)
         self.db.commit()
         self.db.refresh(source)
-        return SourceRead.model_validate(source)
+        return self._to_read(source)
 
     def update_source(self, source_id: UUID, organization_id: UUID, data: SourceUpdate) -> SourceRead:
         source = self._get_or_404(source_id, organization_id)
         updates = data.model_dump(exclude_unset=True)
+        edition_ids = updates.pop("edition_ids", ...)
 
         if "source_type" in updates:
             was_community = is_community_source_type(source.source_type)
@@ -72,9 +85,11 @@ class SourceService:
 
         for field, value in updates.items():
             setattr(source, field, value)
+        if edition_ids is not ...:
+            EditionService(self.db).set_source_editions(source, edition_ids)
         self.db.commit()
         self.db.refresh(source)
-        return SourceRead.model_validate(source)
+        return self._to_read(source)
 
     def delete_source(self, source_id: UUID, organization_id: UUID) -> None:
         source = self._get_or_404(source_id, organization_id)
@@ -86,3 +101,8 @@ class SourceService:
         if not source or source.organization_id != organization_id:
             raise NotFoundError("Source not found")
         return source
+
+    def _to_read(self, source: Source) -> SourceRead:
+        data = SourceRead.model_validate(source)
+        data.edition_ids = EditionService(self.db).edition_ids_for_source(source.id)
+        return data

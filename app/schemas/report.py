@@ -10,6 +10,7 @@ from app.schemas.post import PostRead
 
 class ReportGenerateRequest(BaseModel):
     report_date: date | None = None
+    edition_id: UUID | None = None
 
 
 class DailyReportItemRead(ORMBase):
@@ -23,6 +24,7 @@ class DailyReportItemRead(ORMBase):
 class DailyReportRead(ORMBase):
     id: UUID
     organization_id: UUID
+    edition_id: UUID | None = None
     report_date: date
     title: str
     summary: str

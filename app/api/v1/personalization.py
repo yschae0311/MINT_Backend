@@ -7,11 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.config import get_settings
-from app.core.permissions import require_admin
+from app.core.permissions import require_admin, require_edition_editor_any
 from app.core.security import get_current_user
 from app.core.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.models.enums import Importance, JobType, KeywordMatchMethod, KeywordStatus, ReviewQueueStatus
 from app.models.user import User
+from app.services.membership_service import MembershipService, is_org_admin
 from app.schemas.job import JobRead
 from app.schemas.personalization import (
     CategoryRead,
@@ -56,6 +57,20 @@ def _require_personalization_enabled() -> None:
         raise ForbiddenError("개인화 기능이 일시 중지되었습니다.")
 
 
+def _assert_review_item_editable(db: Session, user: User, item_id: UUID):
+    from app.models.personalization import ReviewQueueItem
+
+    item = db.get(ReviewQueueItem, item_id)
+    if not item or item.organization_id != user.organization_id:
+        raise NotFoundError("Review item not found")
+    post = db.get(Post, item.post_id)
+    if not post or not MembershipService(db).review_item_visible(user, post):
+        raise NotFoundError("Review item not found")
+    if not is_org_admin(user):
+        MembershipService(db).assert_editor_any(user)
+    return item
+
+
 def _category_read(
     row,
     selected: set[UUID],
@@ -74,12 +89,15 @@ def _category_read(
 
 
 def _list_category_reads(service: TaxonomyService, user: User) -> list[CategoryRead]:
+    from app.services.membership_service import MembershipService
+
     service.sync_discovered_categories(user.organization_id)
     service.ensure_defaults(user.organization_id)
     selected = service.selected_category_ids(user.id)
     curated_counts = service.curated_keyword_counts(user.organization_id)
     keyword_counts = service.keyword_counts_by_category(user.organization_id)
     post_counts = service.post_counts_by_category(user.organization_id)
+    visible = MembershipService(service.db).visible_edition_ids(user)
     return [
         _category_read(
             row,
@@ -88,7 +106,7 @@ def _list_category_reads(service: TaxonomyService, user: User) -> list[CategoryR
             keyword_count=keyword_counts.get(row.id, 0),
             post_count=post_counts.get(row.id, 0),
         )
-        for row in service.list_categories(user.organization_id)
+        for row in service.list_categories(user.organization_id, edition_ids=visible)
     ]
 
 
@@ -179,14 +197,22 @@ def list_keywords(
 @router.post("/keywords", response_model=KeywordRead, status_code=status.HTTP_201_CREATED)
 def create_standard_keyword(
     data: KeywordCreate,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
+    from app.services.membership_service import MembershipService
+
+    membership = MembershipService(db)
+    if data.edition_id:
+        membership.assert_editor(user, data.edition_id)
+    elif not is_org_admin(user):
+        raise ForbiddenError("분야를 지정해 키워드를 추가하세요.")
     row = TaxonomyService(db).create_standard_keyword(
         user.organization_id,
         data.name,
         category_id=data.category_id,
         aliases=data.aliases,
+        edition_id=data.edition_id,
     )
     return _keyword_read(row, set())
 
@@ -327,6 +353,23 @@ def personal_feed(
         personalized=True,
         page=page,
         size=size,
+        recency=True,
+    )
+
+
+@router.get("/feed/editorial", response_model=NewsPage)
+def editorial_feed(
+    edition_id: UUID,
+    page: int = Query(1, ge=1),
+    size: int = Query(24, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return PersonalizedNewsService(db).list_editorial(
+        user,
+        edition_id,
+        page=page,
+        size=size,
     )
 
 
@@ -451,18 +494,19 @@ def mark_personal_report_view(
 @router.get("/review-queue", response_model=list[ReviewQueueRead])
 def list_review_queue(
     queue_status: ReviewQueueStatus = Query(ReviewQueueStatus.pending, alias="status"),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
-    return ReviewQueueService(db).list(user.organization_id, queue_status)
+    return ReviewQueueService(db).list(user.organization_id, queue_status, user=user)
 
 
 @router.post("/review-queue/{item_id}/suggest-keywords", response_model=KeywordSuggestResponse)
 def suggest_review_queue_keywords(
     item_id: UUID,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
+    _assert_review_item_editable(db, user, item_id)
     result = ReviewQueueService(db).suggest_keywords(item_id, user.organization_id)
     return KeywordSuggestResponse(
         post_id=result["post_id"],
@@ -475,14 +519,10 @@ def suggest_review_queue_keywords(
 def apply_review_queue_keywords(
     item_id: UUID,
     data: ReviewQueueKeywordsApply,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
-    from app.models.personalization import ReviewQueueItem
-
-    item = db.get(ReviewQueueItem, item_id)
-    if not item or item.organization_id != user.organization_id:
-        raise NotFoundError("Review item not found")
+    item = _assert_review_item_editable(db, user, item_id)
     linked, resolved_ids = ReviewQueueService(db).apply_keywords(
         item_id,
         user.organization_id,
@@ -529,14 +569,10 @@ def reclassify_all_posts(
 @router.post("/review-queue/{item_id}/block-source", status_code=status.HTTP_204_NO_CONTENT)
 def block_review_item_source(
     item_id: UUID,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
-    from app.models.personalization import ReviewQueueItem
-
-    item = db.get(ReviewQueueItem, item_id)
-    if not item or item.organization_id != user.organization_id:
-        raise NotFoundError("Review item not found")
+    item = _assert_review_item_editable(db, user, item_id)
     post = db.get(Post, item.post_id)
     if post and post.source_id:
         source = db.get(Source, post.source_id)
@@ -556,9 +592,10 @@ def block_review_item_source(
 def resolve_review_queue(
     item_id: UUID,
     data: ReviewQueueResolve,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
+    _assert_review_item_editable(db, user, item_id)
     row = ReviewQueueService(db).resolve(
         item_id,
         user.organization_id,
@@ -581,7 +618,7 @@ def resolve_review_queue(
 @router.post("/news/{post_id}/reclassify", response_model=ReclassifyResponse)
 def reclassify_post(
     post_id: UUID,
-    user: User = Depends(require_admin),
+    user: User = Depends(require_edition_editor_any),
     db: Session = Depends(get_db),
 ):
     post = db.get(Post, post_id)

@@ -61,7 +61,7 @@ class AuthService:
 
     def login(self, data: LoginRequest) -> TokenResponse:
         user = self.db.scalar(select(User).where(User.email == data.email))
-        if not user or not verify_password(data.password, user.password_hash):
+        if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
             raise BadRequestError("Invalid email or password")
         if user.approval_status == AccountApprovalStatus.pending:
             raise BadRequestError("Account pending approval")

@@ -22,7 +22,9 @@ KST = ZoneInfo("Asia/Seoul")
 logger = logging.getLogger(__name__)
 
 
-def format_report_title(report_date: date) -> str:
+def format_report_title(report_date: date, edition_name: str | None = None) -> str:
+    if edition_name:
+        return f"MINT 브리핑 · {edition_name} · {report_date.isoformat()}"
     return f"MINT 브리핑 · {report_date.isoformat()}"
 
 
@@ -30,13 +32,49 @@ class ReportService:
     def __init__(self, db: Session):
         self.db = db
 
-    def list_reports(self, organization_id: UUID) -> list[DailyReportRead]:
-        reports = self.db.scalars(
-            select(DailyReport)
-            .where(DailyReport.organization_id == organization_id)
-            .order_by(DailyReport.report_date.desc())
-        ).all()
+    def list_reports(
+        self,
+        organization_id: UUID,
+        *,
+        edition_id: UUID | None = None,
+        edition_ids: set[UUID] | None = None,
+    ) -> list[DailyReportRead]:
+        q = select(DailyReport).where(DailyReport.organization_id == organization_id)
+        if edition_id:
+            q = q.where(DailyReport.edition_id == edition_id)
+        elif edition_ids is not None:
+            if not edition_ids:
+                return []
+            q = q.where(DailyReport.edition_id.in_(edition_ids))
+        reports = self.db.scalars(q.order_by(DailyReport.report_date.desc())).all()
         return [DailyReportRead.model_validate(r) for r in reports]
+
+    def latest_for_edition(self, organization_id: UUID, edition_id: UUID) -> DailyReport | None:
+        row = self.db.scalar(
+            select(DailyReport)
+            .where(
+                DailyReport.organization_id == organization_id,
+                DailyReport.edition_id == edition_id,
+            )
+            .order_by(DailyReport.report_date.desc())
+            .limit(1)
+        )
+        if row:
+            return row
+        from app.services.edition_service import EV_SLUG, EditionService
+
+        edition = EditionService(self.db).get(edition_id, organization_id)
+        if edition.slug != EV_SLUG:
+            return None
+        return self.db.scalar(
+            select(DailyReport)
+            .where(
+                DailyReport.organization_id == organization_id,
+                DailyReport.edition_id.is_(None),
+            )
+            .order_by(DailyReport.report_date.desc())
+            .limit(1)
+        )
 
     def delete_report(self, report_id: UUID, organization_id: UUID) -> None:
         report = self.db.scalar(
@@ -103,6 +141,7 @@ class ReportService:
         *,
         prefer_yesterday: bool = False,
         allow_empty: bool = False,
+        edition_id: UUID | None = None,
     ) -> DailyReportDetail:
         target = self._resolve_report_date(report_date, prefer_yesterday=prefer_yesterday)
         start, end = self._day_range(target)
@@ -120,6 +159,17 @@ class ReportService:
 
         from app.services.ev_display_filter import is_ev_related_post
         from app.search.post_content import mget_post_contents
+        from app.services.edition_service import EditionService
+        from app.services.topic_gate import load_topic_terms
+        from app.models.personalization import PostKeyword
+
+        extra_terms = load_topic_terms(self.db, organization_id)
+        featured_ids: list[UUID] = []
+        if edition_id is None:
+            ev = EditionService(self.db).ev_edition(organization_id)
+            edition_id = ev.id if ev else None
+        if edition_id:
+            featured_ids = EditionService(self.db).featured_keyword_ids(organization_id, edition_id)
 
         contents = mget_post_contents(self.db, [p.id for p in posts])
         ev_posts = []
@@ -128,8 +178,24 @@ class ReportService:
             body = ""
             if content is not None:
                 body = (content.body or content.summary or "")[:4000]
-            if is_ev_related_post(p, body=body):
+            if is_ev_related_post(p, body=body, extra_terms=extra_terms):
                 ev_posts.append(p)
+
+        if featured_ids:
+            post_ids = [p.id for p in ev_posts]
+            matched_ids: set[UUID] = set()
+            if post_ids:
+                matched_ids = set(
+                    self.db.scalars(
+                        select(PostKeyword.post_id).where(
+                            PostKeyword.post_id.in_(post_ids),
+                            PostKeyword.keyword_id.in_(featured_ids),
+                        )
+                    ).all()
+                )
+            featured_posts = [p for p in ev_posts if p.id in matched_ids]
+            if featured_posts:
+                ev_posts = featured_posts
 
         eligible = [
             p
@@ -145,7 +211,7 @@ class ReportService:
                     f"{target.isoformat()} 기준으로 리포트에 포함할 게시글이 없습니다. "
                     "해당 날짜에 수집된 중요/AI 발견 게시글이 있는지 확인하세요."
                 )
-            return self._create_empty_report(organization_id, target)
+            return self._create_empty_report(organization_id, target, edition_id=edition_id)
 
         # 중요 게시판 우선, AI 발견 게시판을 함께 포함 (최대 40건)
         ordered = trusted_posts + discovery_posts
@@ -162,9 +228,14 @@ class ReportService:
         client = get_llm_client()
         result = client.generate_daily_report(payload, target)
         normalized = self._normalize_report_result(result, target)
+        edition_name = None
+        if edition_id:
+            edition_name = EditionService(self.db).get(edition_id, organization_id).name
+        normalized["title"] = format_report_title(target, edition_name)
 
         report = DailyReport(
             organization_id=organization_id,
+            edition_id=edition_id,
             report_date=target,
             title=normalized["title"],
             summary=normalized["summary"],
@@ -472,11 +543,19 @@ class ReportService:
             "action_items": action_items,
         }
 
-    def _create_empty_report(self, organization_id: UUID, target: date) -> DailyReportDetail:
+    def _create_empty_report(
+        self, organization_id: UUID, target: date, *, edition_id: UUID | None = None
+    ) -> DailyReportDetail:
+        edition_name = None
+        if edition_id:
+            from app.services.edition_service import EditionService
+
+            edition_name = EditionService(self.db).get(edition_id, organization_id).name
         report = DailyReport(
             organization_id=organization_id,
+            edition_id=edition_id,
             report_date=target,
-            title=format_report_title(target),
+            title=format_report_title(target, edition_name),
             summary="모니터링 대상 소스를 확인했으나, 오늘은 새로운 변화가 없습니다.",
             model="none",
             prompt_version="v1",

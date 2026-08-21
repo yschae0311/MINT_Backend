@@ -76,6 +76,18 @@ DEFAULT_KEYWORDS = {
     "시장/기업": ("충전 사업자", "완성차", "시장 동향"),
     "기술": ("충전 기술", "로밍", "결제"),
 }
+DEFAULT_AV_CATEGORIES = (
+    "자율주행 정책",
+    "자율주행 기술",
+    "자율주행 시장",
+    "자율주행 안전",
+)
+DEFAULT_AV_KEYWORDS = {
+    "자율주행 정책": ("자율주행 규제", "운행 허가", "레벨4"),
+    "자율주행 기술": ("자율주행", "ADAS", "라이다", "로보택시"),
+    "자율주행 시장": ("웨이모", "자율주행 스타트업"),
+    "자율주행 안전": ("자율주행 사고", "운전자 모니터링"),
+}
 _DISCOVERED_CATEGORY_SORT_BASE = 1000
 
 
@@ -212,6 +224,17 @@ class TaxonomyService:
         self.db = db
 
     def ensure_defaults(self, organization_id: UUID) -> None:
+        from app.services.edition_service import AUTONOMOUS_SLUG, EV_SLUG, EditionService
+
+        edition_svc = EditionService(self.db)
+        edition_svc.ensure_defaults(organization_id)
+        editions = {
+            row.slug: row
+            for row in edition_svc.list_editions(organization_id, active_only=False)
+        }
+        ev_edition = editions.get(EV_SLUG)
+        av_edition = editions.get(AUTONOMOUS_SLUG)
+
         categories = {
             row.normalized_name: row
             for row in self.db.scalars(
@@ -227,12 +250,17 @@ class TaxonomyService:
                     normalized_name=normalized,
                     sort_order=order,
                     is_featured=normalized in _FEATURED_CATEGORY_NAMES,
+                    edition_id=ev_edition.id if ev_edition else None,
                 )
                 self.db.add(row)
                 self.db.flush()
                 categories[normalized] = row
-            elif normalized in _FEATURED_CATEGORY_NAMES and not categories[normalized].is_featured:
-                categories[normalized].is_featured = True
+            else:
+                row = categories[normalized]
+                if normalized in _FEATURED_CATEGORY_NAMES and not row.is_featured:
+                    row.is_featured = True
+                if ev_edition and row.edition_id is None:
+                    row.edition_id = ev_edition.id
 
         existing = {
             row.normalized_name: row
@@ -253,37 +281,102 @@ class TaxonomyService:
                         row.is_curated = True
                     if not row.category_id:
                         row.category_id = category.id
+                    if ev_edition and row.edition_id is None:
+                        row.edition_id = ev_edition.id
+                        if row.is_curated:
+                            row.is_featured = True
                     continue
                 new_row = Keyword(
                     organization_id=organization_id,
                     category_id=category.id,
+                    edition_id=ev_edition.id if ev_edition else None,
                     name=name,
                     normalized_name=normalized,
                     aliases=[],
                     scope=KeywordScope.organization,
                     status=KeywordStatus.active,
                     is_curated=True,
+                    is_featured=True,
                 )
                 self.db.add(new_row)
                 self.db.flush()
                 existing[normalized] = new_row
+
+        if av_edition:
+            av_base = len(DEFAULT_CATEGORIES) + 10
+            for order, name in enumerate(DEFAULT_AV_CATEGORIES):
+                normalized = normalize_keyword(name)
+                if normalized not in categories:
+                    row = NewsCategory(
+                        organization_id=organization_id,
+                        name=name,
+                        normalized_name=normalized,
+                        sort_order=av_base + order,
+                        is_featured=False,
+                        edition_id=av_edition.id,
+                    )
+                    self.db.add(row)
+                    self.db.flush()
+                    categories[normalized] = row
+                elif categories[normalized].edition_id is None:
+                    categories[normalized].edition_id = av_edition.id
+            for category_name, names in DEFAULT_AV_KEYWORDS.items():
+                category = categories.get(normalize_keyword(category_name))
+                if not category:
+                    continue
+                for name in names:
+                    normalized = normalize_keyword(name)
+                    row = existing.get(normalized)
+                    if row:
+                        if not row.is_curated:
+                            row.is_curated = True
+                        if not row.category_id:
+                            row.category_id = category.id
+                        if row.edition_id is None:
+                            row.edition_id = av_edition.id
+                        continue
+                    new_row = Keyword(
+                        organization_id=organization_id,
+                        category_id=category.id,
+                        edition_id=av_edition.id,
+                        name=name,
+                        normalized_name=normalized,
+                        aliases=[],
+                        scope=KeywordScope.organization,
+                        status=KeywordStatus.active,
+                        is_curated=True,
+                        is_featured=True,
+                    )
+                    self.db.add(new_row)
+                    self.db.flush()
+                    existing[normalized] = new_row
         self.db.flush()
 
-    def list_categories(self, organization_id: UUID) -> list[NewsCategory]:
-        return list(
-            self.db.scalars(
-                select(NewsCategory)
-                .where(
-                    NewsCategory.organization_id == organization_id,
-                    NewsCategory.is_active.is_(True),
-                )
-                .order_by(
-                    NewsCategory.is_featured.desc(),
-                    NewsCategory.sort_order,
-                    NewsCategory.name,
-                )
-            ).all()
+    def list_categories(
+        self, organization_id: UUID, *, edition_ids: set[UUID] | None = None
+    ) -> list[NewsCategory]:
+        q = (
+            select(NewsCategory)
+            .where(
+                NewsCategory.organization_id == organization_id,
+                NewsCategory.is_active.is_(True),
+            )
+            .order_by(
+                NewsCategory.is_featured.desc(),
+                NewsCategory.sort_order,
+                NewsCategory.name,
+            )
         )
+        rows = list(self.db.scalars(q).all())
+        if edition_ids is None:
+            return rows
+        if not edition_ids:
+            return []
+        return [
+            row
+            for row in rows
+            if row.edition_id is None or row.edition_id in edition_ids
+        ]
 
     def sync_discovered_categories(self, organization_id: UUID) -> int:
         """Import distinct post.category values into news_categories."""
@@ -476,12 +569,23 @@ class TaxonomyService:
             ).all()
         )
         if include_discovered:
-            return rows
-        selected = self.selected_ids(user.id)
+            scoped = rows
+        else:
+            selected = self.selected_ids(user.id)
+            scoped = [
+                row
+                for row in rows
+                if row.is_curated or row.owner_user_id == user.id or row.id in selected
+            ]
+        from app.services.membership_service import MembershipService
+
+        visible = MembershipService(self.db).visible_edition_ids(user)
+        if visible is None:
+            return scoped
         return [
             row
-            for row in rows
-            if row.is_curated or row.owner_user_id == user.id or row.id in selected
+            for row in scoped
+            if row.edition_id is None or row.edition_id in visible
         ]
 
     def keyword_catalog_text(self, organization_id: UUID) -> str:
@@ -501,25 +605,24 @@ class TaxonomyService:
         if not keywords:
             return ""
         grouped: dict[str, list[str]] = defaultdict(list)
+        from app.models.edition import Edition
+
+        edition_names = {
+            row.id: row.name
+            for row in self.db.scalars(
+                select(Edition).where(Edition.organization_id == organization_id)
+            ).all()
+        }
         for keyword in keywords:
             category_name = category_names.get(keyword.category_id) or "미분류"
-            grouped[category_name].append(keyword.name)
+            edition_name = edition_names.get(keyword.edition_id) if keyword.edition_id else None
+            label = f"{edition_name} / {category_name}" if edition_name else category_name
+            grouped[label].append(keyword.name)
         lines = [
             "## 조직 키워드 참고 (가능하면 아래 용어를 우선 매칭, 없으면 신규 제안)"
         ]
-        seen: set[str] = set()
-        for category in categories:
-            names = grouped.get(category.name)
-            if not names:
-                continue
-            seen.add(category.name)
-            lines.append(f"- {category.name}: {', '.join(names[:40])}")
-        for category_name in sorted(grouped):
-            if category_name in seen:
-                continue
-            lines.append(
-                f"- {category_name}: {', '.join(grouped[category_name][:40])}"
-            )
+        for label in sorted(grouped):
+            lines.append(f"- {label}: {', '.join(grouped[label][:40])}")
         return "\n".join(lines)
 
     def selected_ids(self, user_id: UUID) -> set[UUID]:
@@ -792,6 +895,7 @@ class TaxonomyService:
         category_id: UUID | None = None,
         aliases: list[str] | None = None,
         status: KeywordStatus = KeywordStatus.active,
+        edition_id: UUID | None = None,
     ) -> Keyword:
         normalized = normalize_keyword(name)
         existing = self.db.scalar(
@@ -803,15 +907,19 @@ class TaxonomyService:
         )
         if existing:
             raise BadRequestError("이미 존재하는 표준 키워드입니다.")
+        category = self.db.get(NewsCategory, category_id) if category_id else None
+        resolved_edition = edition_id or (category.edition_id if category else None)
         row = Keyword(
             organization_id=organization_id,
             category_id=category_id,
+            edition_id=resolved_edition,
             name=name.strip(),
             normalized_name=normalized,
             aliases=[a.strip() for a in aliases or [] if a.strip()],
             scope=KeywordScope.organization,
             status=status,
             is_curated=True,
+            is_featured=bool(resolved_edition),
         )
         self.db.add(row)
         self.db.commit()
@@ -1351,9 +1459,17 @@ class PersonalizedNewsService:
         date_to: date | None = None,
         page: int = 1,
         size: int = 20,
+        recency: bool = False,
     ) -> NewsPage:
         selected = set(keyword_ids or [])
         taxonomy = TaxonomyService(self.db)
+        from app.services.membership_service import MembershipService
+
+        membership = MembershipService(self.db)
+        if not personalized:
+            selected = membership.restrict_keyword_ids(user, keyword_ids)
+            if not selected and membership.visible_edition_ids(user) is not None:
+                return NewsPage(items=[], total=0, page=page, size=size, pages=1)
         if personalized and not selected:
             selected = taxonomy.selected_ids(user.id)
         selected_category_names = (
@@ -1363,6 +1479,13 @@ class PersonalizedNewsService:
         )
         if personalized and not selected and not selected_category_names:
             return NewsPage(items=[], total=0, page=page, size=size, pages=1)
+
+        if date_from is None:
+            days = get_settings().feed_window_days
+            if days > 0:
+                date_from = datetime.now(KST).date() - timedelta(days=days)
+
+        use_recency = recency or personalized
 
         if get_settings().search_uses_elasticsearch and (query or "").strip():
             es_page = self._list_news_es(
@@ -1376,6 +1499,7 @@ class PersonalizedNewsService:
                 date_to=date_to,
                 page=page,
                 size=size,
+                recency=use_recency,
             )
             if es_page is not None:
                 return es_page
@@ -1436,17 +1560,19 @@ class PersonalizedNewsService:
         posts = list(self.db.scalars(q.order_by(Post.collected_at.desc())).unique().all())
         contents = mget_post_contents(self.db, [post.id for post in posts])
         from app.services.ev_display_filter import is_ev_related_post
+        from app.services.topic_gate import load_topic_terms
 
+        extra_terms = load_topic_terms(self.db, user.organization_id)
         items = []
         for post in posts:
             content = contents.get(post.id)
             body = ""
             if content is not None:
                 body = (content.body or content.summary or "")[:4000]
-            if not is_ev_related_post(post, body=body):
+            if not is_ev_related_post(post, body=body, extra_terms=extra_terms):
                 continue
             items.append(self._to_item(post, selected, user.id, content))
-        if personalized:
+        if personalized and not use_recency:
             items = self._diversified(items)
         total = len(items)
         offset = (page - 1) * size
@@ -1456,6 +1582,44 @@ class PersonalizedNewsService:
             page=page,
             size=size,
             pages=max(1, (total + size - 1) // size),
+        )
+
+    def list_editorial(
+        self,
+        user: User,
+        edition_id: UUID,
+        *,
+        page: int = 1,
+        size: int = 24,
+    ) -> NewsPage:
+        from app.services.edition_service import EditionService
+        from app.services.membership_service import MembershipService
+
+        MembershipService(self.db).assert_view(user, edition_id)
+        edition_svc = EditionService(self.db)
+        edition = edition_svc.get(edition_id, user.organization_id)
+        featured_ids = edition_svc.featured_keyword_ids(user.organization_id, edition.id)
+        if not featured_ids:
+            featured_ids = list(
+                self.db.scalars(
+                    select(Keyword.id).where(
+                        Keyword.organization_id == user.organization_id,
+                        Keyword.edition_id == edition.id,
+                        Keyword.is_curated.is_(True),
+                        Keyword.scope == KeywordScope.organization,
+                        Keyword.status.in_([KeywordStatus.active, KeywordStatus.candidate]),
+                    )
+                ).all()
+            )
+        if not featured_ids:
+            return NewsPage(items=[], total=0, page=page, size=size, pages=1)
+        return self.list_news(
+            user,
+            personalized=False,
+            keyword_ids=featured_ids,
+            page=page,
+            size=size,
+            recency=True,
         )
 
     def _list_news_es(
@@ -1471,6 +1635,7 @@ class PersonalizedNewsService:
         date_to: date | None,
         page: int,
         size: int,
+        recency: bool = False,
     ) -> NewsPage | None:
         date_from_dt = None
         date_to_dt = None
@@ -1507,14 +1672,16 @@ class PersonalizedNewsService:
         hit_by_id = {hit.post_id: hit for hit in result.hits}
         contents = mget_post_contents(self.db, [post.id for post in posts])
         from app.services.ev_display_filter import is_ev_related_post
+        from app.services.topic_gate import load_topic_terms
 
+        extra_terms = load_topic_terms(self.db, user.organization_id)
         items = []
         for post in posts:
             content = contents.get(post.id)
             body = ""
             if content is not None:
                 body = (content.body or content.summary or "")[:4000]
-            if not is_ev_related_post(post, body=body):
+            if not is_ev_related_post(post, body=body, extra_terms=extra_terms):
                 continue
             items.append(
                 self._to_item(
@@ -1525,8 +1692,18 @@ class PersonalizedNewsService:
                     hit=hit_by_id.get(post.id),
                 )
             )
-        if personalized:
+        if personalized and not recency:
             items = self._diversified(items)
+            total = len(items)
+            offset = (page - 1) * size
+            return NewsPage(
+                items=items[offset : offset + size],
+                total=total,
+                page=page,
+                size=size,
+                pages=max(1, (total + size - 1) // size),
+            )
+        if personalized:
             total = len(items)
             offset = (page - 1) * size
             return NewsPage(
@@ -1920,22 +2097,12 @@ class ReviewQueueService:
     def __init__(self, db: Session):
         self.db = db
 
-    def pending_count(self, organization_id: UUID) -> int:
-        return (
-            self.db.scalar(
-                select(func.count())
-                .select_from(ReviewQueueItem)
-                .join(Post, Post.id == ReviewQueueItem.post_id)
-                .where(
-                    ReviewQueueItem.organization_id == organization_id,
-                    ReviewQueueItem.status == ReviewQueueStatus.pending,
-                    Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
-                )
-            )
-            or 0
-        )
-
-    def list(self, organization_id: UUID, status: ReviewQueueStatus) -> list[ReviewQueueRead]:
+    def list(
+        self,
+        organization_id: UUID,
+        status: ReviewQueueStatus,
+        user: User | None = None,
+    ) -> list[ReviewQueueRead]:
         rows = self.db.execute(
             select(ReviewQueueItem, Post)
             .join(Post, Post.id == ReviewQueueItem.post_id)
@@ -1946,6 +2113,11 @@ class ReviewQueueService:
             )
             .order_by(ReviewQueueItem.created_at.desc())
         ).all()
+        membership = None
+        if user is not None:
+            from app.services.membership_service import MembershipService
+
+            membership = MembershipService(self.db)
         return [
             ReviewQueueRead(
                 id=item.id,
@@ -1957,7 +2129,25 @@ class ReviewQueueService:
                 created_at=item.created_at,
             )
             for item, post in rows
+            if membership is None or membership.review_item_visible(user, post)
         ]
+
+    def pending_count(self, organization_id: UUID, user: User | None = None) -> int:
+        if user is None:
+            return (
+                self.db.scalar(
+                    select(func.count())
+                    .select_from(ReviewQueueItem)
+                    .join(Post, Post.id == ReviewQueueItem.post_id)
+                    .where(
+                        ReviewQueueItem.organization_id == organization_id,
+                        ReviewQueueItem.status == ReviewQueueStatus.pending,
+                        Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+                    )
+                )
+                or 0
+            )
+        return len(self.list(organization_id, ReviewQueueStatus.pending, user=user))
 
     def resolve(
         self,

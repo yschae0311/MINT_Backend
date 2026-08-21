@@ -18,8 +18,9 @@ class User(Base):
         UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
     )
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    keycloak_sub: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True, index=True)
     role: Mapped[UserRole] = mapped_column(str_enum(UserRole, "user_role"), default=UserRole.admin)
     approval_status: Mapped[AccountApprovalStatus] = mapped_column(
         str_enum(AccountApprovalStatus, "account_approval_status"),

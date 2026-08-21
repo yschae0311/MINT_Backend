@@ -20,6 +20,7 @@ class CategoryRead(ORMBase):
     selected: bool = False
     is_featured: bool = True
     is_discovered: bool = False
+    edition_id: UUID | None = None
     curated_keyword_count: int = 0
     keyword_count: int = 0
     post_count: int = 0
@@ -50,6 +51,8 @@ class KeywordRead(ORMBase):
     status: KeywordStatus
     usage_count: int
     is_curated: bool = False
+    is_featured: bool = False
+    edition_id: UUID | None = None
     selected: bool = False
 
 
@@ -57,6 +60,7 @@ class KeywordCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     category_id: UUID | None = None
     aliases: list[str] = Field(default_factory=list, max_length=20)
+    edition_id: UUID | None = None
 
 
 class KeywordUpdate(BaseModel):

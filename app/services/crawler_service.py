@@ -95,6 +95,16 @@ class CrawlerService:
         )
         self.trusted_list_max_candidates = 15
         self._discovery_progress: CrawlProgressTracker | None = None
+        self._topic_terms_by_org: dict[UUID, list[str]] = {}
+
+    def _topic_terms(self, organization_id: UUID) -> list[str]:
+        cached = self._topic_terms_by_org.get(organization_id)
+        if cached is None:
+            from app.services.topic_gate import load_topic_terms
+
+            cached = load_topic_terms(self.db, organization_id)
+            self._topic_terms_by_org[organization_id] = cached
+        return cached
 
     def _tick_discovery_progress(self, outcome: CandidateOutcome) -> None:
         if self._discovery_progress is not None:
@@ -487,7 +497,7 @@ class CrawlerService:
             self._tick_discovery_progress("skipped")
             return "skipped", "content_short"
 
-        if not passes_keyword_gate(title, content, url):
+        if not passes_keyword_gate(title, content, url, self._topic_terms(source.organization_id)):
             from app.services.ev_relevance import is_weak_topic_only
 
             reason = "weak_topic_only" if is_weak_topic_only(title, content, url) else "ai_topic_mismatch"
@@ -516,7 +526,7 @@ class CrawlerService:
             self._tick_discovery_progress("skipped")
             return "skipped", reason
 
-        reject = ai_reject_reason(evaluation, title, content, url)
+        reject = ai_reject_reason(evaluation, title, content, url, self._topic_terms(source.organization_id))
         if reject:
             logger.debug(
                 "Discovery rejected: %s — %s",
@@ -814,7 +824,7 @@ class CrawlerService:
         if len(content) < self._min_content_len_for(source):
             return False
 
-        if not passes_keyword_gate(title, content, url or ""):
+        if not passes_keyword_gate(title, content, url or "", self._topic_terms(source.organization_id)):
             logger.debug("Crawl keyword gate rejected: %s", title[:80])
             return False
 
@@ -826,7 +836,7 @@ class CrawlerService:
         except Exception as exc:
             logger.warning("Crawl AI evaluation failed for %s: %s", url, exc)
             return False
-        if not passes_ai_evaluation(evaluation, title, content, url or ""):
+        if not passes_ai_evaluation(evaluation, title, content, url or "", self._topic_terms(source.organization_id)):
             logger.debug(
                 "Crawl AI relevance rejected: %s — %s",
                 title[:80],

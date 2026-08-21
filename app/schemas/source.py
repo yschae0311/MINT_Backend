@@ -19,6 +19,7 @@ class SourceBase(BaseModel):
     auto_publish: bool = True
     crawl_frequency: str = "daily"
     is_active: bool = True
+    edition_ids: list[UUID] = Field(default_factory=list)
 
 
 class SourceCreate(SourceBase):
@@ -36,6 +37,7 @@ class SourceUpdate(BaseModel):
     auto_publish: bool | None = None
     crawl_frequency: str | None = None
     is_active: bool | None = None
+    edition_ids: list[UUID] | None = None
 
 
 class SourceRead(ORMBase):
@@ -53,6 +55,7 @@ class SourceRead(ORMBase):
     crawl_frequency: str
     last_crawled_at: datetime | None
     is_active: bool
+    edition_ids: list[UUID] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
