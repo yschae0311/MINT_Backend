@@ -80,6 +80,196 @@ class LLMClient(ABC):
         ...
 
 
+class BedrockClient(LLMClient):
+    def __init__(self) -> None:
+        settings = get_settings()
+        if not settings.bedrock_text_ready:
+            raise BadRequestError(
+                "Bedrock is not configured. Set AWS_REGION, BEDROCK_SUMMARY_MODEL, "
+                "and BEDROCK_REPORT_MODEL (plus BEDROCK_API_KEY or AWS credentials)."
+            )
+        from app.services.bedrock_runtime import create_bedrock_runtime_client
+
+        self._client = create_bedrock_runtime_client(settings)
+        self.summary_model = settings.bedrock_summary_model.strip()
+        self.report_model = settings.bedrock_report_model.strip()
+
+    def _extract_text(self, response: dict) -> str:
+        output = (response or {}).get("output") or {}
+        message = output.get("message") or {}
+        chunks: list[str] = []
+        for part in message.get("content") or []:
+            text = (part or {}).get("text")
+            if text:
+                chunks.append(text)
+        return "\n".join(chunks).strip()
+
+    def _generate(
+        self,
+        model_id: str,
+        system: str,
+        user: str,
+        *,
+        json_mode: bool = False,
+        max_tokens: int = 4096,
+    ) -> str:
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        user_text = user
+        if json_mode:
+            user_text = (
+                f"{user.rstrip()}\n\n"
+                "Respond with a single valid JSON object only. No markdown fences."
+            )
+        kwargs: dict = {
+            "modelId": model_id,
+            "messages": [{"role": "user", "content": [{"text": user_text}]}],
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0.2},
+        }
+        if system.strip():
+            kwargs["system"] = [{"text": system}]
+        try:
+            response = self._client.converse(**kwargs)
+        except (ClientError, BotoCoreError) as exc:
+            raise BadRequestError(f"Bedrock request failed: {exc}") from exc
+        text = self._extract_text(response)
+        if not text:
+            raise BadRequestError("Bedrock returned empty response")
+        return text
+
+    def _generate_json_korean(
+        self,
+        model_name: str,
+        system: str,
+        user: str,
+        *,
+        string_fields: tuple[str, ...],
+        list_fields: tuple[str, ...] = (),
+        max_tokens: int = 4096,
+    ) -> dict:
+        payload_user = f"{user.rstrip()}{KOREAN_USER_SUFFIX}"
+        result = _parse_json(
+            self._generate(model_name, system, payload_user, json_mode=True, max_tokens=max_tokens)
+        )
+        if not result_needs_korean_retry(result, string_fields, list_fields):
+            return result
+        retry_user = f"{payload_user}{KOREAN_RETRY_NOTE}"
+        return _parse_json(
+            self._generate(model_name, system, retry_user, json_mode=True, max_tokens=max_tokens)
+        )
+
+    def translate_title(self, title: str) -> str:
+        system = _load_prompt("title_translate_v1.md")
+        user = f"제목: {title[:500]}"
+        result = _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
+        translated = (result.get("title") or "").strip()
+        if not translated:
+            raise BadRequestError("Bedrock returned empty title translation")
+        return translated[:512]
+
+    def classify_post_content(
+        self, title: str, content: str, *, keyword_catalog: str | None = None
+    ) -> dict:
+        system = _load_prompt("post_classify_v1.md")
+        user = f"제목: {title}\n\n본문:\n{content[:12000]}"
+        if keyword_catalog:
+            user = f"{user.rstrip()}\n\n{keyword_catalog.strip()}"
+        return self._generate_json_korean(
+            self.summary_model,
+            system,
+            user,
+            string_fields=("category",),
+            list_fields=(),
+        )
+
+    def summarize_post(self, title: str, content: str) -> dict:
+        system = _load_prompt("post_summary_v1.md")
+        user = f"제목: {title}\n\n본문:\n{content[:12000]}"
+        return self._generate_json_korean(
+            self.summary_model,
+            system,
+            user,
+            string_fields=("summary", "impact"),
+            list_fields=("action_items",),
+        )
+
+    def evaluate_discovery_candidate(
+        self, title: str, content: str, url: str, *, community: bool = False
+    ) -> dict:
+        prompt_name = (
+            "discovery_evaluate_community_v1.md" if community else "discovery_evaluate_v1.md"
+        )
+        system = _load_prompt(prompt_name)
+        user = f"URL: {url}\n제목: {title}\n\n본문:\n{content[:12000]}"
+        return self._generate_json_korean(
+            self.summary_model,
+            system,
+            user,
+            string_fields=("summary", "impact", "category", "relevance_reason"),
+            list_fields=("action_items",),
+        )
+
+    def generate_daily_report(
+        self, posts: list[dict], report_date: date, *, edition: dict | None = None
+    ) -> dict:
+        system = _load_prompt("daily_report_v1.md")
+        payload: dict = {"report_date": report_date.isoformat(), "posts": posts}
+        if edition:
+            payload["edition"] = {
+                "name": edition.get("name") or "",
+                "slug": edition.get("slug") or "",
+                "topics": edition.get("topics") or [],
+            }
+        user = json.dumps(payload, ensure_ascii=False)
+        return self._generate_json_korean(
+            self.report_model,
+            system,
+            user,
+            string_fields=("summary",),
+            list_fields=(),
+            max_tokens=6144,
+        )
+
+    def generate_report_illustration_scene(
+        self, summary: str, highlights: list[dict], report_date: date
+    ) -> str:
+        system = _load_prompt("report_illustration_v1.md")
+        user = json.dumps(
+            {
+                "report_date": report_date.isoformat(),
+                "summary": summary[:400],
+                "highlights": [
+                    {
+                        "title": (h.get("title") or "")[:80],
+                        "description": (h.get("description") or h.get("why_read") or "")[:120],
+                    }
+                    for h in highlights[:4]
+                ],
+            },
+            ensure_ascii=False,
+        )
+        result = _parse_json(self._generate(self.report_model, system, user, json_mode=True))
+        scene = (result.get("scene") or "").strip()
+        if not scene:
+            raise BadRequestError("Bedrock returned empty illustration scene")
+        return scene[:500]
+
+    def answer_question(self, question: str, context: str) -> str:
+        system = _load_prompt("chat_assistant_v1.md")
+        user = f"[참고 자료]\n{context[:14000]}\n\n[질문]\n{question}"
+        return self._generate(self.summary_model, system, user)
+
+    def classify_chat_question(self, question: str) -> dict:
+        system = _load_prompt("chat_guard_v1.md")
+        user = f"질문: {question[:1000]}"
+        return _parse_json(self._generate(self.summary_model, system, user, json_mode=True))
+
+    def answer_question_general(self, question: str) -> str:
+        system = _load_prompt("chat_general_v1.md")
+        user = f"[질문]\n{question}"
+        return self._generate(self.summary_model, system, user)
+
+
 class GeminiClient(LLMClient):
     def __init__(self) -> None:
         settings = get_settings()
@@ -385,6 +575,9 @@ class MockLLMClient(LLMClient):
 
 def get_llm_client() -> LLMClient:
     settings = get_settings()
-    if settings.llm_provider.lower() == "gemini" and settings.gemini_api_key:
+    provider = settings.llm_provider.lower().strip()
+    if provider == "bedrock" and settings.bedrock_text_ready:
+        return BedrockClient()
+    if provider == "gemini" and settings.gemini_api_key:
         return GeminiClient()
     return MockLLMClient()

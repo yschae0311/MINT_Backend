@@ -373,7 +373,9 @@ class ReportService:
 
     def _attach_illustration(self, report: DailyReport, client, normalized: dict) -> None:
         settings = get_settings()
-        if not settings.report_illustration_enabled or not settings.gemini_api_key:
+        from app.services.bedrock_runtime import illustration_provider_ready
+
+        if not illustration_provider_ready(settings):
             return
         try:
             scene = client.generate_report_illustration_scene(
@@ -402,8 +404,10 @@ class ReportService:
             return report.illustration_url
 
         settings = get_settings()
-        if not settings.report_illustration_enabled or not settings.gemini_api_key.strip():
-            raise BadRequestError("일러스트 생성이 비활성화되어 있거나 API 키가 없습니다.")
+        from app.services.bedrock_runtime import illustration_provider_ready
+
+        if not illustration_provider_ready(settings):
+            raise BadRequestError("일러스트 생성이 비활성화되어 있거나 이미지 모델이 없습니다.")
 
         highlights = report.key_changes if isinstance(report.key_changes, list) else []
         client = get_llm_client()
@@ -441,8 +445,10 @@ class ReportService:
         """Return today's front-page illustration (generate at most once per KST day)."""
         _ = seed  # retained for API compat; daily cache is date-keyed
         settings = get_settings()
-        if not settings.report_illustration_enabled or not settings.gemini_api_key.strip():
-            raise BadRequestError("일러스트 생성이 비활성화되어 있거나 API 키가 없습니다.")
+        from app.services.bedrock_runtime import illustration_provider_ready
+
+        if not illustration_provider_ready(settings):
+            raise BadRequestError("일러스트 생성이 비활성화되어 있거나 이미지 모델이 없습니다.")
 
         today = datetime.now(KST).date().isoformat()
         illus = ReportIllustrationService()

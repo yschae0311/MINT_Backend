@@ -28,7 +28,23 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 30
 
-    llm_provider: str = "gemini"
+    llm_provider: str = "bedrock"
+    # gemini | bedrock | mock
+
+    # Amazon Bedrock (text + optional Nova Canvas image). Prefer BEDROCK_API_KEY
+    # (sets AWS_BEARER_TOKEN_BEDROCK) or IAM keys / instance role.
+    aws_region: str = "ap-northeast-2"
+    bedrock_api_key: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_session_token: str = ""
+    bedrock_summary_model: str = ""
+    bedrock_report_model: str = ""
+    bedrock_image_model: str = "amazon.nova-canvas-v1:0"
+    # Image models may only exist in another region (e.g. Stability in us-west-2).
+    bedrock_image_region: str = ""
+
+    # Legacy Gemini (kept for optional rollback / TTS).
     gemini_api_key: str = ""
     gemini_summary_model: str = "gemini-2.5-flash-lite"
     gemini_report_model: str = "gemini-2.5-flash"
@@ -37,8 +53,8 @@ class Settings(BaseSettings):
     personalization_enabled: bool = False
     classification_confidence_threshold: float = 0.6
 
-    # Gemini TTS (server narration). Browser SpeechSynthesis is the frontend fallback.
-    tts_enabled: bool = True
+    # Server TTS was Gemini-only. Off by default on Bedrock; browser SpeechSynthesis still works.
+    tts_enabled: bool = False
     gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
     gemini_tts_voice: str = "Kore"
 
@@ -105,6 +121,23 @@ class Settings(BaseSettings):
     @property
     def keycloak_configured(self) -> bool:
         return bool(self.keycloak_issuer.strip() and self.keycloak_client_id.strip())
+
+    @property
+    def bedrock_text_ready(self) -> bool:
+        return bool(
+            self.aws_region.strip()
+            and self.bedrock_summary_model.strip()
+            and self.bedrock_report_model.strip()
+        )
+
+    @property
+    def bedrock_auth_configured(self) -> bool:
+        if self.bedrock_api_key.strip():
+            return True
+        if self.aws_access_key_id.strip() and self.aws_secret_access_key.strip():
+            return True
+        # Instance role / shared credentials / SSO profile may still work.
+        return True
 
     @property
     def search_uses_elasticsearch(self) -> bool:

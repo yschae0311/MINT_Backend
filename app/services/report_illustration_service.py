@@ -1,5 +1,7 @@
 import base64
+import json
 import logging
+import random
 import time
 from pathlib import Path
 from uuid import UUID
@@ -42,7 +44,7 @@ class ReportIllustrationService:
         self.media_root = Path(self.settings.media_root)
         self.reports_dir = self.media_root / "reports"
 
-    def _model_candidates(self) -> list[str]:
+    def _gemini_model_candidates(self) -> list[str]:
         primary = (self.settings.gemini_image_model or "").strip()
         ordered: list[str] = []
         for name in (*_IMAGE_MODEL_FALLBACKS, primary):
@@ -54,8 +56,100 @@ class ReportIllustrationService:
         return ordered
 
     def generate_image_bytes(self, scene: str) -> bytes | None:
+        if not self.settings.report_illustration_enabled:
+            return None
+        provider = self.settings.llm_provider.lower().strip()
+        if provider == "bedrock":
+            return self._generate_bedrock_image(scene)
+        if provider == "gemini":
+            return self._generate_gemini_image(scene)
+        return None
+
+    def _bedrock_image_payloads(self, prompt: str) -> list[dict]:
+        model_id = (self.settings.bedrock_image_model or "").lower()
+        if "stability" in model_id or "stable-image" in model_id:
+            return [
+                {
+                    "prompt": prompt[:10000],
+                    "aspect_ratio": "1:1",
+                    "output_format": "png",
+                    "seed": random.randint(0, 4_294_967_295),
+                },
+                {"prompt": prompt[:10000], "output_format": "png"},
+            ]
+        # Amazon Nova Canvas / Titan-style TEXT_IMAGE
+        return [
+            {
+                "taskType": "TEXT_IMAGE",
+                "textToImageParams": {"text": prompt[:1024]},
+                "imageGenerationConfig": {
+                    "seed": random.randint(0, 858_993_459),
+                    "quality": "standard",
+                    "height": 768,
+                    "width": 1024,
+                    "numberOfImages": 1,
+                },
+            }
+        ]
+
+    def _generate_bedrock_image(self, scene: str) -> bytes | None:
+        model_id = (self.settings.bedrock_image_model or "").strip()
+        if not model_id:
+            return None
+
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from app.services.bedrock_runtime import create_bedrock_runtime_client
+
+        image_region = (
+            (self.settings.bedrock_image_region or "").strip()
+            or (self.settings.aws_region or "").strip()
+        )
+        scenes = [scene.strip(), _SIMPLE_SCENE]
+        try:
+            client = create_bedrock_runtime_client(self.settings, region=image_region)
+        except Exception as exc:
+            logger.warning("Bedrock illustration client failed: %s", exc)
+            return None
+
+        for attempt_scene in scenes:
+            if not attempt_scene:
+                continue
+            prompt = f"{NEWSPAPER_SKETCH_PREFIX}{attempt_scene}"
+            for payload in self._bedrock_image_payloads(prompt):
+                try:
+                    response = client.invoke_model(
+                        modelId=model_id,
+                        body=json.dumps(payload),
+                        contentType="application/json",
+                        accept="application/json",
+                    )
+                    body = response.get("body")
+                    raw = body.read() if hasattr(body, "read") else body
+                    data = json.loads(raw)
+                    images = data.get("images") or []
+                    if not images:
+                        logger.warning(
+                            "Bedrock illustration returned no images (model=%s region=%s)",
+                            model_id,
+                            image_region,
+                        )
+                        continue
+                    return base64.b64decode(images[0])
+                except (ClientError, BotoCoreError, ValueError, TypeError) as exc:
+                    logger.warning(
+                        "Bedrock illustration failed (model=%s region=%s): %s",
+                        model_id,
+                        image_region,
+                        exc,
+                    )
+                    time.sleep(0.3)
+
+        return None
+
+    def _generate_gemini_image(self, scene: str) -> bytes | None:
         api_key = self.settings.gemini_api_key.strip()
-        if not api_key or not self.settings.report_illustration_enabled:
+        if not api_key:
             return None
 
         scenes = [scene.strip(), _SIMPLE_SCENE]
@@ -82,21 +176,21 @@ class ReportIllustrationService:
             if not attempt_scene:
                 continue
             prompt = f"{NEWSPAPER_SKETCH_PREFIX}{attempt_scene}"
-            for model in self._model_candidates():
+            for model in self._gemini_model_candidates():
                 for cfg in payloads:
                     payload = {
                         "contents": [{"parts": [{"text": prompt}]}],
                         **cfg,
                     }
-                    image = self._request_image(api_key, model, payload)
+                    image = self._request_gemini_image(api_key, model, payload)
                     if image:
                         return image
                 time.sleep(0.4)
 
-        logger.warning("Report illustration exhausted all model/payload fallbacks")
+        logger.warning("Report illustration exhausted all Gemini model/payload fallbacks")
         return None
 
-    def _request_image(self, api_key: str, model: str, payload: dict) -> bytes | None:
+    def _request_gemini_image(self, api_key: str, model: str, payload: dict) -> bytes | None:
         url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
         try:
             with httpx.Client(timeout=120.0) as client:
