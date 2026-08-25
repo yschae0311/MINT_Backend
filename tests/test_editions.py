@@ -32,7 +32,7 @@ from app.services.edition_service import AUTONOMOUS_SLUG, EV_SLUG, EditionServic
 from app.services.ev_relevance import passes_keyword_gate
 from app.services.personalization_service import PersonalizedNewsService, TaxonomyService
 from app.services.post_service import PostService
-from app.services.topic_gate import load_topic_terms
+from app.services.topic_gate import load_edition_topic_terms, load_topic_terms
 
 
 class EditionsServiceTest(unittest.TestCase):
@@ -241,6 +241,64 @@ class EditionsServiceTest(unittest.TestCase):
         self.assertTrue({"로보택시", "자율주행", "ocpp"} <= lowered or "ocpp" in lowered)
         self.assertIn("로보택시", lowered)
         self.assertIn("자율주행", lowered)
+
+    def test_edition_topic_terms_stay_separate(self) -> None:
+        editions = {row.slug: row for row in self.editions.list_editions(self.org_id)}
+        ev_terms = {
+            term.lower()
+            for term in load_edition_topic_terms(self.db, self.org_id, editions[EV_SLUG].id)
+        }
+        av_terms = {
+            term.lower()
+            for term in load_edition_topic_terms(
+                self.db, self.org_id, editions[AUTONOMOUS_SLUG].id
+            )
+        }
+        self.assertIn("ocpp", ev_terms)
+        self.assertIn("로보택시", av_terms)
+        self.assertNotIn("로보택시", ev_terms)
+        self.assertNotIn("ocpp", av_terms)
+
+    def test_generate_briefings_are_edition_specific(self) -> None:
+        prev_provider = os.environ.get("LLM_PROVIDER")
+        os.environ["LLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        try:
+            from zoneinfo import ZoneInfo
+
+            from app.services.report_service import ReportService
+
+            now = datetime.now(ZoneInfo("Asia/Seoul"))
+            ev_post = self._post(title="전기차 충전 요금 인하", index=31, collected_at=now)
+            av_post = self._post(title="자율주행 로보택시 운행 허가", index=32, collected_at=now)
+            self.db.commit()
+            editions = {row.slug: row for row in self.editions.list_editions(self.org_id)}
+            svc = ReportService(self.db)
+            ev_report = svc.generate(
+                self.org_id, now.date(), allow_empty=True, edition_id=editions[EV_SLUG].id
+            )
+            av_report = svc.generate(
+                self.org_id,
+                now.date(),
+                allow_empty=True,
+                edition_id=editions[AUTONOMOUS_SLUG].id,
+            )
+            self.assertIn("전기차", ev_report.title)
+            self.assertIn("자율주행", av_report.title)
+            self.assertIn("전기차", ev_report.summary)
+            self.assertIn("자율주행", av_report.summary)
+            ev_ids = {item.post_id for item in ev_report.items}
+            av_ids = {item.post_id for item in av_report.items}
+            self.assertIn(ev_post.id, ev_ids)
+            self.assertNotIn(av_post.id, ev_ids)
+            self.assertIn(av_post.id, av_ids)
+            self.assertNotIn(ev_post.id, av_ids)
+        finally:
+            if prev_provider is None:
+                os.environ.pop("LLM_PROVIDER", None)
+            else:
+                os.environ["LLM_PROVIDER"] = prev_provider
+            get_settings.cache_clear()
 
 
 class TopicGateUnitTest(unittest.TestCase):

@@ -56,7 +56,9 @@ class LLMClient(ABC):
         ...
 
     @abstractmethod
-    def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
+    def generate_daily_report(
+        self, posts: list[dict], report_date: date, *, edition: dict | None = None
+    ) -> dict:
         ...
 
     @abstractmethod
@@ -173,12 +175,18 @@ class GeminiClient(LLMClient):
             list_fields=("action_items",),
         )
 
-    def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
+    def generate_daily_report(
+        self, posts: list[dict], report_date: date, *, edition: dict | None = None
+    ) -> dict:
         system = _load_prompt("daily_report_v1.md")
-        user = json.dumps(
-            {"report_date": report_date.isoformat(), "posts": posts},
-            ensure_ascii=False,
-        )
+        payload: dict = {"report_date": report_date.isoformat(), "posts": posts}
+        if edition:
+            payload["edition"] = {
+                "name": edition.get("name") or "",
+                "slug": edition.get("slug") or "",
+                "topics": edition.get("topics") or [],
+            }
+        user = json.dumps(payload, ensure_ascii=False)
         return self._generate_json_korean(
             self.report_model,
             system,
@@ -310,7 +318,9 @@ class MockLLMClient(LLMClient):
             "keywords": classified.get("keywords", []),
         }
 
-    def generate_daily_report(self, posts: list[dict], report_date: date) -> dict:
+    def generate_daily_report(
+        self, posts: list[dict], report_date: date, *, edition: dict | None = None
+    ) -> dict:
         recommendations = []
         for p in posts[:5]:
             board = p.get("board", "trusted")
@@ -323,8 +333,9 @@ class MockLLMClient(LLMClient):
                     "importance": p.get("importance", "medium"),
                 }
             )
+        desk = ((edition or {}).get("name") or "").strip() or "전기차·충전"
         return {
-            "summary": f"{report_date.isoformat()} 기준 {len(posts)}건 수집. EV·충전 동향을 짧게 정리했습니다.",
+            "summary": f"{report_date.isoformat()} 기준 {len(posts)}건 수집. {desk} 동향을 짧게 정리했습니다.",
             "recommendations": recommendations or [
                 {
                     "title": "주요 이슈 없음",

@@ -31,8 +31,6 @@ def oidc_login(data: OidcLoginRequest, db: Session = Depends(get_db)):
         code=data.code,
         redirect_uri=data.redirect_uri,
         code_verifier=data.code_verifier,
-        username=data.username,
-        password=data.password,
     )
 
 

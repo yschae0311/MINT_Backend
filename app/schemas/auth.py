@@ -46,8 +46,6 @@ class OidcLoginRequest(BaseModel):
     code: str | None = None
     redirect_uri: str | None = None
     code_verifier: str | None = None
-    username: str | None = None
-    password: str | None = None
 
 
 class OidcConfigResponse(BaseModel):

@@ -131,26 +131,6 @@ class KeycloakLoginTest(unittest.TestCase):
         self.assertEqual(seed.keycloak_sub, "kc-admin")
         self.assertEqual(seed.role, UserRole.admin)
 
-    def test_password_grant_login_issues_mint_tokens(self) -> None:
-        claims = {
-            "sub": "kc-pw",
-            "email": "pw@example.com",
-            "name": "비번",
-            "azp": "mint",
-        }
-        with (
-            patch(
-                "app.services.keycloak_service.password_grant",
-                return_value=("kc-access", "kc-id"),
-            ),
-            patch("app.services.keycloak_service.verify_access_token", return_value=claims),
-        ):
-            issued = KeycloakAuthService(self.db).login(username="pw@example.com", password="secret")
-        user = self.db.scalar(select(User).where(User.keycloak_sub == "kc-pw"))
-        self.assertIsNotNone(user)
-        self.assertTrue(issued.access_token)
-        self.assertEqual(issued.id_token, "kc-id")
-
 
 if __name__ == "__main__":
     unittest.main()

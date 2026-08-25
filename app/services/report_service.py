@@ -56,7 +56,7 @@ class ReportService:
                 DailyReport.organization_id == organization_id,
                 DailyReport.edition_id == edition_id,
             )
-            .order_by(DailyReport.report_date.desc())
+            .order_by(DailyReport.report_date.desc(), DailyReport.created_at.desc())
             .limit(1)
         )
         if row:
@@ -72,7 +72,7 @@ class ReportService:
                 DailyReport.organization_id == organization_id,
                 DailyReport.edition_id.is_(None),
             )
-            .order_by(DailyReport.report_date.desc())
+            .order_by(DailyReport.report_date.desc(), DailyReport.created_at.desc())
             .limit(1)
         )
 
@@ -134,6 +134,63 @@ class ReportService:
                 return summary[:500]
         return post.title
 
+    def _post_url(self, post: Post) -> str:
+        original = getattr(post, "original_url", None) or ""
+        if original:
+            return original
+        source = getattr(post, "source", None)
+        if source is not None and getattr(source, "url", None):
+            return source.url or ""
+        return ""
+
+    def _edition_source_ids(self, organization_id: UUID, edition_id: UUID) -> set[UUID]:
+        from app.models.edition import SourceEdition
+        from app.models.source import Source
+
+        return set(
+            self.db.scalars(
+                select(SourceEdition.source_id)
+                .join(Source, Source.id == SourceEdition.source_id)
+                .where(
+                    Source.organization_id == organization_id,
+                    SourceEdition.edition_id == edition_id,
+                )
+            ).all()
+        )
+
+    def _post_matches_edition(
+        self,
+        post: Post,
+        *,
+        body: str,
+        edition,
+        topic_terms: list[str],
+        source_ids: set[UUID],
+    ) -> bool:
+        from app.services.edition_service import AUTONOMOUS_SLUG, EV_SLUG
+        from app.services.ev_relevance import (
+            has_strong_av_signal,
+            has_strong_ev_signal,
+            is_obvious_junk,
+            matches_topic_terms,
+        )
+
+        title = (post.title or "").strip()
+        url = self._post_url(post)
+        if is_obvious_junk(title, body, url):
+            return False
+        if post.source_id and post.source_id in source_ids:
+            return True
+        if edition.slug == EV_SLUG:
+            return has_strong_ev_signal(title, body, url) or matches_topic_terms(
+                title, body, url, topic_terms
+            )
+        if edition.slug == AUTONOMOUS_SLUG:
+            return has_strong_av_signal(title, body, url) or matches_topic_terms(
+                title, body, url, topic_terms
+            )
+        return matches_topic_terms(title, body, url, topic_terms)
+
     def generate(
         self,
         organization_id: UUID,
@@ -157,32 +214,52 @@ class ReportService:
             )
         ).unique().all()
 
-        from app.services.ev_display_filter import is_ev_related_post
         from app.search.post_content import mget_post_contents
         from app.services.edition_service import EditionService
-        from app.services.topic_gate import load_topic_terms
         from app.models.personalization import PostKeyword
 
-        extra_terms = load_topic_terms(self.db, organization_id)
-        featured_ids: list[UUID] = []
+        edition_svc = EditionService(self.db)
         if edition_id is None:
-            ev = EditionService(self.db).ev_edition(organization_id)
+            ev = edition_svc.ev_edition(organization_id)
             edition_id = ev.id if ev else None
+
+        edition = None
+        topic_terms: list[str] = []
+        featured_ids: list[UUID] = []
+        source_ids: set[UUID] = set()
         if edition_id:
-            featured_ids = EditionService(self.db).featured_keyword_ids(organization_id, edition_id)
+            edition = edition_svc.get(edition_id, organization_id)
+            from app.services.topic_gate import load_edition_topic_terms
+
+            topic_terms = load_edition_topic_terms(self.db, organization_id, edition_id)
+            featured_ids = edition_svc.featured_keyword_ids(organization_id, edition_id)
+            source_ids = self._edition_source_ids(organization_id, edition_id)
 
         contents = mget_post_contents(self.db, [p.id for p in posts])
-        ev_posts = []
+        scoped_posts = []
         for p in posts:
             content = contents.get(p.id)
             body = ""
             if content is not None:
                 body = (content.body or content.summary or "")[:4000]
-            if is_ev_related_post(p, body=body, extra_terms=extra_terms):
-                ev_posts.append(p)
+            if edition is None:
+                from app.services.ev_display_filter import is_ev_related_post
+                from app.services.topic_gate import load_topic_terms
+
+                extra_terms = load_topic_terms(self.db, organization_id)
+                if is_ev_related_post(p, body=body, extra_terms=extra_terms):
+                    scoped_posts.append(p)
+            elif self._post_matches_edition(
+                p,
+                body=body,
+                edition=edition,
+                topic_terms=topic_terms,
+                source_ids=source_ids,
+            ):
+                scoped_posts.append(p)
 
         if featured_ids:
-            post_ids = [p.id for p in ev_posts]
+            post_ids = [p.id for p in scoped_posts]
             matched_ids: set[UUID] = set()
             if post_ids:
                 matched_ids = set(
@@ -193,13 +270,13 @@ class ReportService:
                         )
                     ).all()
                 )
-            featured_posts = [p for p in ev_posts if p.id in matched_ids]
+            featured_posts = [p for p in scoped_posts if p.id in matched_ids]
             if featured_posts:
-                ev_posts = featured_posts
+                scoped_posts = featured_posts
 
         eligible = [
             p
-            for p in ev_posts
+            for p in scoped_posts
             if p.board_type in (BoardType.trusted, BoardType.discovery)
         ]
         trusted_posts = [p for p in eligible if p.board_type == BoardType.trusted]
@@ -226,11 +303,16 @@ class ReportService:
             for p in ordered[:40]
         ]
         client = get_llm_client()
-        result = client.generate_daily_report(payload, target)
+        edition_payload = None
+        if edition is not None:
+            edition_payload = {
+                "name": edition.name,
+                "slug": edition.slug,
+                "topics": topic_terms[:40],
+            }
+        result = client.generate_daily_report(payload, target, edition=edition_payload)
         normalized = self._normalize_report_result(result, target)
-        edition_name = None
-        if edition_id:
-            edition_name = EditionService(self.db).get(edition_id, organization_id).name
+        edition_name = edition.name if edition is not None else None
         normalized["title"] = format_report_title(target, edition_name)
 
         report = DailyReport(

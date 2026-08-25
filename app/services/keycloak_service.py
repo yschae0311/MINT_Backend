@@ -160,54 +160,6 @@ def exchange_code(
     return access_token, str(id_token) if id_token else None
 
 
-def _token_error(response: httpx.Response, fallback: str) -> None:
-    err = ""
-    try:
-        err = str((response.json() or {}).get("error") or "")
-    except Exception:
-        err = ""
-    if err == "invalid_grant":
-        raise UnauthorizedError("아이디 또는 비밀번호가 올바르지 않습니다.")
-    if err == "unauthorized_client":
-        raise ServiceUnavailableError(
-            "Keycloak 클라이언트에서 Direct access grants를 활성화해 주세요."
-        )
-    logger.warning("Keycloak token request failed: %s %s", response.status_code, err)
-    raise UnauthorizedError(fallback)
-
-
-def password_grant(username: str, password: str) -> tuple[str, str | None]:
-    _require_configured()
-    user = username.strip()
-    if not user or not password:
-        raise BadRequestError("아이디와 비밀번호를 입력해 주세요.")
-    issuer = _issuer()
-    payload = {
-        "grant_type": "password",
-        "client_id": _client_id(),
-        "username": user,
-        "password": password,
-        "scope": "openid email profile",
-    }
-    url = f"{issuer}/protocol/openid-connect/token"
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.post(url, data=payload)
-            if response.status_code >= 400:
-                _token_error(response, "Keycloak 로그인에 실패했습니다.")
-            body = response.json()
-    except (UnauthorizedError, ServiceUnavailableError, BadRequestError):
-        raise
-    except httpx.HTTPError as exc:
-        logger.warning("Keycloak password grant failed: %s", exc)
-        raise UnauthorizedError("Keycloak 로그인에 실패했습니다.") from exc
-    access_token = body.get("access_token")
-    if not access_token:
-        raise UnauthorizedError("Keycloak 로그인에 실패했습니다.")
-    id_token = body.get("id_token")
-    return access_token, str(id_token) if id_token else None
-
-
 def extract_roles(claims: dict[str, Any]) -> set[str]:
     roles: set[str] = set()
     realm = claims.get("realm_access") or {}
@@ -244,19 +196,14 @@ class KeycloakAuthService:
         code: str | None = None,
         redirect_uri: str | None = None,
         code_verifier: str | None = None,
-        username: str | None = None,
-        password: str | None = None,
     ) -> TokenResponse:
         _require_configured()
         token = (access_token or "").strip()
         id_token: str | None = None
         if not token:
-            if (username or "").strip() and password:
-                token, id_token = password_grant(username, password)
-            elif (code or "").strip() and (redirect_uri or "").strip():
-                token, id_token = exchange_code(code.strip(), redirect_uri.strip(), code_verifier)
-            else:
-                raise BadRequestError("아이디와 비밀번호를 입력해 주세요.")
+            if not (code or "").strip() or not (redirect_uri or "").strip():
+                raise BadRequestError("access_token 또는 code+redirect_uri가 필요합니다.")
+            token, id_token = exchange_code(code.strip(), redirect_uri.strip(), code_verifier)
         claims = verify_access_token(token)
         sub = str(claims.get("sub") or "").strip()
         if not sub:
