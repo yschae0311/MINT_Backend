@@ -468,6 +468,10 @@ class MockLLMClient(LLMClient):
             ("배터리", ("배터리", "battery")),
             ("전기차 정책", ("정책", "보조금", "regulation")),
             ("V2G", ("v2g",)),
+            ("로보택시", ("로보택시", "robotaxi")),
+            ("자율주행", ("자율주행", "autonomous", "self-driving")),
+            ("ADAS", ("adas",)),
+            ("웨이모", ("waymo", "웨이모")),
         )
         matched = [
             {"name": name, "confidence": 0.82}
@@ -487,7 +491,7 @@ class MockLLMClient(LLMClient):
         if not relevant:
             return {
                 "is_relevant": False,
-                "relevance_reason": "EV/충전 직접 관련 신호 없음",
+                "relevance_reason": "전기차·충전 또는 자율주행 직접 관련 신호 없음",
                 "summary": "",
                 "impact": "",
                 "action_items": [],
@@ -498,7 +502,7 @@ class MockLLMClient(LLMClient):
             }
         return {
             "is_relevant": True,
-            "relevance_reason": "EV/충전 직접 관련 신호 확인",
+            "relevance_reason": "전기차·충전 또는 자율주행 직접 관련 신호 확인",
             "summary": f"{prefix}{title[:120]} — 수집된 {'커뮤니티' if community else '뉴스'} 후보입니다.",
             "impact": "조직 키워드·업무 관점에서 확인이 필요합니다.",
             "action_items": ["원문 링크 확인"],

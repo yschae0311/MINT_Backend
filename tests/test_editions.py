@@ -17,6 +17,7 @@ from app.models.enums import (
     CreatedBy,
     Importance,
     KeywordMatchMethod,
+    KeywordStatus,
     PostStatus,
     SourceType,
     TrustLevel,
@@ -112,6 +113,48 @@ class EditionsServiceTest(unittest.TestCase):
         self.assertNotEqual(av.edition_id, ev.edition_id)
         self.assertTrue(av.is_featured)
         self.assertTrue(ev.is_featured)
+
+    def test_ensure_defaults_promotes_existing_av_keywords(self) -> None:
+        keyword = self._keyword("자율주행")
+        self.assertIsNotNone(keyword)
+        keyword.is_featured = False
+        keyword.status = KeywordStatus.candidate
+        self.db.commit()
+
+        TaxonomyService(self.db).ensure_defaults(self.org_id)
+        self.db.commit()
+        self.db.refresh(keyword)
+        self.assertTrue(keyword.is_featured)
+        self.assertEqual(keyword.status, KeywordStatus.active)
+
+    def test_shared_auto_rss_gets_av_tag_even_if_already_ev(self) -> None:
+        from app.models.edition import SourceEdition
+        from app.services.seed import SHARED_AV_SOURCE_URLS, _tag_seed_sources
+
+        editions = {row.slug: row for row in self.editions.list_editions(self.org_id)}
+        source = Source(
+            organization_id=self.org_id,
+            name="오토헤럴드",
+            url=SHARED_AV_SOURCE_URLS[0],
+            source_type=SourceType.rss,
+            is_active=True,
+        )
+        self.db.add(source)
+        self.db.flush()
+        self.db.add(SourceEdition(source_id=source.id, edition_id=editions[EV_SLUG].id))
+        self.db.commit()
+
+        _tag_seed_sources(self.db, self.org_id)
+        self.db.commit()
+        tagged = {
+            item.slug
+            for item in self.db.scalars(
+                select(Edition)
+                .join(SourceEdition, SourceEdition.edition_id == Edition.id)
+                .where(SourceEdition.source_id == source.id)
+            ).all()
+        }
+        self.assertEqual({EV_SLUG, AUTONOMOUS_SLUG}, tagged)
 
     def test_create_edition_adds_another_vertical(self) -> None:
         row = self.editions.create(
@@ -308,6 +351,15 @@ class TopicGateUnitTest(unittest.TestCase):
                 "로보택시 운행 허가",
                 "서울에서 자율주행 로보택시 시범 운행이 확대된다.",
                 "https://example.com/av",
+            )
+        )
+
+    def test_keyword_gate_accepts_autonomous_vehicle_english(self) -> None:
+        self.assertTrue(
+            passes_keyword_gate(
+                "Waymo expands robotaxi fleet",
+                "The autonomous vehicle service will add new downtown routes.",
+                "https://www.autonomousvehicleinternational.com/news/waymo.html",
             )
         )
 

@@ -332,8 +332,11 @@ class TaxonomyService:
                             row.is_curated = True
                         if not row.category_id:
                             row.category_id = category.id
-                        if row.edition_id is None:
+                        if row.edition_id is None or row.edition_id != av_edition.id:
                             row.edition_id = av_edition.id
+                        row.is_featured = True
+                        if row.status == KeywordStatus.candidate:
+                            row.status = KeywordStatus.active
                         continue
                     new_row = Keyword(
                         organization_id=organization_id,

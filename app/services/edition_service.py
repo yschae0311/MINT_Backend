@@ -33,6 +33,8 @@ AUTONOMOUS_TOPIC_TERMS = [
     "robotaxi",
     "라이다",
     "lidar",
+    "autonomous vehicle",
+    "웨이모",
     "레벨4",
     "운행 허가",
 ]

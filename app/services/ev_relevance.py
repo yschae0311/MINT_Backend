@@ -38,12 +38,13 @@ _STRONG_EV = re.compile(
 
 # 자율주행·ADAS (사업 분야 확장용 기본 신호)
 _STRONG_AV = re.compile(
-    r"자율\s*주행|autonomous\s*driving|self-driving|"
+    r"자율\s*주행|autonomous\s*(?:driving|vehicle|car|truck)|self-driving|"
     r"로보\s*택시|robotaxi|robot\s*taxi|"
     r"(?<![a-z])adas(?![a-z])|"
     r"라이다|lidar|"
     r"레벨\s*[3-5]|level\s*[3-5]|"
-    r"운행\s*허가|무인\s*셔틀",
+    r"운행\s*허가|무인\s*(?:셔틀|택시|버스)|"
+    r"(?<![a-z])waymo(?![a-z])|웨이모",
     re.I,
 )
 

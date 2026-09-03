@@ -119,7 +119,7 @@ AUTONOMOUS_SOURCE_SEEDS = (
         "source_type": SourceType.news_page,
         "category": "자율주행 정책",
         "reliability_score": 92,
-        "edition_slug": "autonomous",
+        "edition_slugs": ("autonomous",),
     },
     {
         "name": "Autonomous Vehicle International",
@@ -127,8 +127,41 @@ AUTONOMOUS_SOURCE_SEEDS = (
         "source_type": SourceType.rss,
         "category": "자율주행 기술",
         "reliability_score": 80,
-        "edition_slug": "autonomous",
+        "edition_slugs": ("autonomous",),
     },
+    {
+        "name": "Automotive News",
+        "url": "https://www.autonews.com/arc/outboundfeeds/rss/?outputType=xml",
+        "source_type": SourceType.rss,
+        "category": "자율주행 시장",
+        "reliability_score": 82,
+        "edition_slugs": ("autonomous",),
+    },
+    {
+        "name": "Electrek Autonomous",
+        "url": "https://electrek.co/guides/autonomous/feed/",
+        "source_type": SourceType.rss,
+        "category": "자율주행 기술",
+        "reliability_score": 78,
+        "edition_slugs": ("autonomous",),
+    },
+    {
+        "name": "모터그래프",
+        "url": "https://www.motorgraph.com/rss/allArticle.xml",
+        "source_type": SourceType.rss,
+        "category": "시장/기업",
+        "reliability_score": 80,
+        "edition_slugs": ("ev", "autonomous"),
+    },
+)
+
+# 이미 EV로 수집 중인 자동차·테크 RSS. 자율주행 기사도 여기서 나옴.
+SHARED_AV_SOURCE_URLS = (
+    "https://www.autoherald.co.kr/rss/allArticle.xml",
+    "https://rss.etnews.com/Section901.xml",
+    "https://feeds.feedburner.com/zdkorea",
+    "https://www.yna.co.kr/rss/industry.xml",
+    "https://www.motorgraph.com/rss/allArticle.xml",
 )
 
 # 구 환경부(me.go.kr) HTML 소스 → 기후에너지환경부(mcee.go.kr) 마이그레이션
@@ -281,7 +314,6 @@ def seed_defaults(db: Session) -> None:
     _seed_sources(db, org.id, AUTONOMOUS_SOURCE_SEEDS, low_trust=False)
 
     from app.services.personalization_service import TaxonomyService
-    from app.services.edition_service import AUTONOMOUS_SLUG, EV_SLUG
 
     TaxonomyService(db).ensure_defaults(org.id)
     _tag_seed_sources(db, org.id)
@@ -296,15 +328,23 @@ def _tag_seed_sources(db: Session, organization_id) -> None:
         row.slug: row
         for row in db.scalars(select(Edition).where(Edition.organization_id == organization_id)).all()
     }
-    ev = editions.get(EV_SLUG)
-    av = editions.get(AUTONOMOUS_SLUG)
-    av_urls = {seed["url"] for seed in AUTONOMOUS_SOURCE_SEEDS}
+    av_seed_slugs = {
+        seed["url"]: tuple(seed.get("edition_slugs") or (AUTONOMOUS_SLUG,))
+        for seed in AUTONOMOUS_SOURCE_SEEDS
+    }
     sources = db.scalars(select(Source).where(Source.organization_id == organization_id)).all()
     for source in sources:
-        exists = db.scalar(select(SourceEdition).where(SourceEdition.source_id == source.id))
-        if exists:
-            continue
-        target = av if source.url in av_urls else ev
-        if not target:
-            continue
-        db.add(SourceEdition(source_id=source.id, edition_id=target.id))
+        slugs = av_seed_slugs.get(source.url)
+        if slugs is None and source.url in SHARED_AV_SOURCE_URLS:
+            slugs = (EV_SLUG, AUTONOMOUS_SLUG)
+        if slugs is None:
+            slugs = (EV_SLUG,)
+        existing = set(
+            db.scalars(select(SourceEdition.edition_id).where(SourceEdition.source_id == source.id)).all()
+        )
+        for slug in slugs:
+            edition = editions.get(slug)
+            if not edition or edition.id in existing:
+                continue
+            db.add(SourceEdition(source_id=source.id, edition_id=edition.id))
+            existing.add(edition.id)

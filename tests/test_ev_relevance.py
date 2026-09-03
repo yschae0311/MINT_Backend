@@ -105,3 +105,21 @@ def test_keyword_gate_accepts_autonomous():
         "자율주행 레벨4 운행 허가가 늘어난다.",
         "https://example.com/av",
     )
+
+
+def test_keyword_gate_accepts_autonomous_vehicle_english():
+    assert passes_keyword_gate(
+        "Waymo robotaxi expansion",
+        "The company will grow its autonomous vehicle fleet in two cities.",
+        "https://www.autonews.com/mobility/waymo",
+    )
+
+
+def test_mock_llm_discovery_accepts_autonomous():
+    llm = MockLLMClient()
+    ok = llm.evaluate_discovery_candidate(
+        "강남 로보택시 운행 구역 확대",
+        "자율주행 레벨4 시범 운행이 강남으로 늘어난다.",
+        "https://example.com/robotaxi",
+    )
+    assert ok["is_relevant"] is True

@@ -143,21 +143,6 @@ class ReportService:
             return source.url or ""
         return ""
 
-    def _edition_source_ids(self, organization_id: UUID, edition_id: UUID) -> set[UUID]:
-        from app.models.edition import SourceEdition
-        from app.models.source import Source
-
-        return set(
-            self.db.scalars(
-                select(SourceEdition.source_id)
-                .join(Source, Source.id == SourceEdition.source_id)
-                .where(
-                    Source.organization_id == organization_id,
-                    SourceEdition.edition_id == edition_id,
-                )
-            ).all()
-        )
-
     def _post_matches_edition(
         self,
         post: Post,
@@ -165,7 +150,6 @@ class ReportService:
         body: str,
         edition,
         topic_terms: list[str],
-        source_ids: set[UUID],
     ) -> bool:
         from app.services.edition_service import AUTONOMOUS_SLUG, EV_SLUG
         from app.services.ev_relevance import (
@@ -179,8 +163,6 @@ class ReportService:
         url = self._post_url(post)
         if is_obvious_junk(title, body, url):
             return False
-        if post.source_id and post.source_id in source_ids:
-            return True
         if edition.slug == EV_SLUG:
             return has_strong_ev_signal(title, body, url) or matches_topic_terms(
                 title, body, url, topic_terms
@@ -226,14 +208,12 @@ class ReportService:
         edition = None
         topic_terms: list[str] = []
         featured_ids: list[UUID] = []
-        source_ids: set[UUID] = set()
         if edition_id:
             edition = edition_svc.get(edition_id, organization_id)
             from app.services.topic_gate import load_edition_topic_terms
 
             topic_terms = load_edition_topic_terms(self.db, organization_id, edition_id)
             featured_ids = edition_svc.featured_keyword_ids(organization_id, edition_id)
-            source_ids = self._edition_source_ids(organization_id, edition_id)
 
         contents = mget_post_contents(self.db, [p.id for p in posts])
         scoped_posts = []
@@ -254,7 +234,6 @@ class ReportService:
                 body=body,
                 edition=edition,
                 topic_terms=topic_terms,
-                source_ids=source_ids,
             ):
                 scoped_posts.append(p)
 
