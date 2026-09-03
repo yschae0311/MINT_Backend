@@ -156,6 +156,41 @@ class PersonalizationServiceTest(unittest.TestCase):
         self.assertNotIn("no_keywords", [reason.value for reason in reasons])
         self.assertNotIn("uncategorized", [reason.value for reason in reasons])
 
+    def test_classify_skips_review_when_llm_fails_but_title_matches(self) -> None:
+        post = self._post()
+
+        class BoomLLM(MockLLMClient):
+            def classify_post_content(self, title, content, *, keyword_catalog=None):
+                raise RuntimeError("llm down")
+
+        with patch(
+            "app.services.personalization_service.get_llm_client",
+            return_value=BoomLLM(),
+        ):
+            names, reasons = ClassificationService(self.db).classify_post(post)
+        self.assertTrue(names)
+        reason_values = [reason.value for reason in reasons]
+        self.assertNotIn("extraction_failed", reason_values)
+        self.assertNotIn("no_keywords", reason_values)
+
+    def test_classify_forces_curated_keyword_when_ai_returns_empty(self) -> None:
+        post = self._post(99)
+        post.title = "무인 셔틀 시범 노선 확대"
+        post.raw_content = "도심 구간에서 시범 운행이 시작된다."
+        self.db.commit()
+
+        class EmptyLLM(MockLLMClient):
+            def classify_post_content(self, title, content, *, keyword_catalog=None):
+                return {"category": "자율주행 기술", "confidence": 0.3, "keywords": []}
+
+        with patch(
+            "app.services.personalization_service.get_llm_client",
+            return_value=EmptyLLM(),
+        ):
+            names, reasons = ClassificationService(self.db).classify_post(post)
+        self.assertTrue({"자율주행", "로보택시", "ADAS", "레벨4"} & set(names))
+        self.assertNotIn("no_keywords", [reason.value for reason in reasons])
+
     def test_personal_keyword_is_not_exposed_to_another_user(self) -> None:
         other = User(
             organization_id=self.user.organization_id,

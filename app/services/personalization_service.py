@@ -1152,6 +1152,7 @@ class ClassificationService:
         linked_names: list[str] = []
         seen_names: set[str] = set()
         seen_keyword_ids: set[UUID] = set()
+        deferred_new: list[tuple[str, float]] = []
         for name, confidence, matched_keyword in sorted(
             candidates,
             key=lambda item: item[1],
@@ -1167,6 +1168,7 @@ class ClassificationService:
             )
             if not keyword:
                 if confidence < _MIN_NEW_KEYWORD_CONFIDENCE:
+                    deferred_new.append((name, confidence))
                     continue
                 keyword = Keyword(
                     organization_id=post.organization_id,
@@ -1203,9 +1205,69 @@ class ClassificationService:
             if len(linked_names) >= _MAX_KEYWORDS_PER_POST:
                 break
 
-        confidence = float(merged.get("confidence") or self._latest_confidence(post) or 0)
         if not linked_names:
+            for name, confidence in deferred_new:
+                if len(linked_names) >= _MAX_KEYWORDS_PER_POST:
+                    break
+                normalized = normalize_keyword(name)
+                if not normalized or normalized in seen_names:
+                    continue
+                keyword = Keyword(
+                    organization_id=post.organization_id,
+                    category_id=category.id if category else None,
+                    name=name.strip()[:128],
+                    normalized_name=normalized[:128],
+                    aliases=[],
+                    scope=KeywordScope.organization,
+                    status=KeywordStatus.candidate,
+                    is_curated=False,
+                )
+                self.db.add(keyword)
+                self.db.flush()
+                organization_keywords.append(keyword)
+                seen_names.add(normalized)
+                seen_keyword_ids.add(keyword.id)
+                self.db.add(
+                    PostKeyword(
+                        post_id=post.id,
+                        keyword_id=keyword.id,
+                        confidence=max(0.0, min(confidence, 1.0)),
+                        matched_by=KeywordMatchMethod.ai,
+                    )
+                )
+                linked_names.append(keyword.name)
+
+        if not linked_names:
+            for name, confidence, keyword in self._forced_curated_keywords(
+                post, blob, organization_keywords, category
+            ):
+                if len(linked_names) >= _MAX_KEYWORDS_PER_POST:
+                    break
+                if keyword.id in seen_keyword_ids:
+                    continue
+                seen_names.add(keyword.normalized_name)
+                seen_keyword_ids.add(keyword.id)
+                keyword.usage_count = int(keyword.usage_count or 0) + 1
+                self.db.add(
+                    PostKeyword(
+                        post_id=post.id,
+                        keyword_id=keyword.id,
+                        confidence=max(0.0, min(confidence, 1.0)),
+                        matched_by=KeywordMatchMethod.alias,
+                    )
+                )
+                linked_names.append(keyword.name)
+
+        if linked_names:
+            review_reasons = [
+                reason
+                for reason in review_reasons
+                if reason
+                not in (ReviewQueueReason.no_keywords, ReviewQueueReason.extraction_failed)
+            ]
+        else:
             review_reasons.append(ReviewQueueReason.no_keywords)
+
         self._sync_review_queue(post, list(dict.fromkeys(review_reasons)))
         post.keywords = {"items": linked_names, "classification_version": "v2"}
         self.db.flush()
@@ -1218,6 +1280,57 @@ class ClassificationService:
             content = get_post_content(self.db, post.id)
         parts = [post.title or "", content.body or "", content.summary or ""]
         return normalize_keyword(" ".join(part for part in parts if part))
+
+    def _forced_curated_keywords(
+        self,
+        post: Post,
+        blob: str,
+        organization_keywords: list[Keyword],
+        category,
+    ) -> list[tuple[str, float, Keyword]]:
+        from app.services.ev_relevance import has_strong_av_signal, has_strong_ev_signal
+
+        curated = [
+            keyword
+            for keyword in organization_keywords
+            if keyword.is_curated and keyword.scope == KeywordScope.organization
+        ]
+        if not curated:
+            return []
+
+        by_name = {keyword.normalized_name: keyword for keyword in curated}
+        hits: list[tuple[str, float, Keyword]] = []
+        seen: set[UUID] = set()
+
+        def add(keyword: Keyword | None, confidence: float) -> None:
+            if keyword is None or keyword.id in seen:
+                return
+            seen.add(keyword.id)
+            hits.append((keyword.name, confidence, keyword))
+
+        title = post.title or ""
+        url = getattr(post, "original_url", None) or ""
+        if has_strong_av_signal(title, blob, url):
+            for name in ("자율주행", "로보택시", "ADAS", "레벨4"):
+                add(by_name.get(normalize_keyword(name)), 0.52)
+        if has_strong_ev_signal(title, blob, url):
+            for name in ("충전 인프라", "충전소", "전기차 정책", "OCPP"):
+                add(by_name.get(normalize_keyword(name)), 0.52)
+
+        if not hits and category is not None:
+            same_edition = [
+                keyword
+                for keyword in curated
+                if category.edition_id and keyword.edition_id == category.edition_id
+            ]
+            pool = [keyword for keyword in same_edition if keyword.is_featured] or same_edition
+            if pool:
+                add(pool[0], 0.4)
+
+        if not hits:
+            featured = [keyword for keyword in curated if keyword.is_featured]
+            add((featured or curated)[0], 0.35)
+        return hits
 
     def _extract_classification(
         self,
