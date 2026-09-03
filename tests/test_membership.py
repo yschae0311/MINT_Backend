@@ -78,7 +78,7 @@ class MembershipServiceTest(unittest.TestCase):
         with self.assertRaises(NotFoundError):
             self.membership.assert_view(self.member, self.editions[EV_SLUG].id)
 
-    def test_one_editor_per_edition(self) -> None:
+    def test_multiple_editors_per_edition(self) -> None:
         from sqlalchemy import select
 
         av = self.editions[AUTONOMOUS_SLUG]
@@ -92,9 +92,9 @@ class MembershipServiceTest(unittest.TestCase):
             [UserEditionAssignment(edition_id=av.id, is_editor=True)],
         )
         editors = list(self.db.scalars(select(UserEdition).where(UserEdition.edition_id == av.id)).all())
-        self.assertEqual(sum(1 for row in editors if row.is_editor), 1)
+        self.assertEqual(sum(1 for row in editors if row.is_editor), 2)
         self.assertTrue(any(row.user_id == other.id and row.is_editor for row in editors))
-        self.assertTrue(any(row.user_id == self.member.id and not row.is_editor for row in editors))
+        self.assertTrue(any(row.user_id == self.member.id and row.is_editor for row in editors))
 
     def test_editor_cannot_edit_other_edition(self) -> None:
         av = self.editions[AUTONOMOUS_SLUG]

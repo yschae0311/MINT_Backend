@@ -277,20 +277,6 @@ class MembershipService:
         if len(editions) != len(edition_ids):
             raise BadRequestError("선택할 수 없는 분야가 포함되어 있습니다.")
 
-        editor_ids = {item.edition_id for item in unique.values() if item.is_editor}
-        if editor_ids:
-            previous = list(
-                self.db.scalars(
-                    select(UserEdition).where(
-                        UserEdition.edition_id.in_(editor_ids),
-                        UserEdition.is_editor.is_(True),
-                        UserEdition.user_id != target.id,
-                    )
-                ).all()
-            )
-            for row in previous:
-                row.is_editor = False
-
         self.db.execute(delete(UserEdition).where(UserEdition.user_id == target.id))
         for item in unique.values():
             self.db.add(

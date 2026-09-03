@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, Index, text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -43,16 +43,7 @@ class SourceEdition(Base):
 
 class UserEdition(Base):
     __tablename__ = "user_editions"
-    __table_args__ = (
-        UniqueConstraint("user_id", "edition_id"),
-        Index(
-            "uq_user_editions_one_editor",
-            "edition_id",
-            unique=True,
-            sqlite_where=text("is_editor = 1"),
-            postgresql_where=text("is_editor IS TRUE"),
-        ),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "edition_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(

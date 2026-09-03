@@ -246,10 +246,7 @@ def _migrate_pg_columns() -> None:
             )
         )
         conn.execute(
-            text(
-                f'CREATE UNIQUE INDEX IF NOT EXISTS uq_user_editions_one_editor '
-                f'ON "{_schema}".user_editions (edition_id) WHERE is_editor IS TRUE'
-            )
+            text(f'DROP INDEX IF EXISTS "{_schema}".uq_user_editions_one_editor')
         )
     logger.debug('Ensured background_jobs.status column width')
 
