@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from app.models.enums import SourceType
+from app.services.article_text import soup_to_article_text
 
 COMMUNITY_SOURCE_TYPES: frozenset[SourceType] = frozenset(
     {SourceType.reddit, SourceType.community_forum}
@@ -180,14 +181,14 @@ def extract_community_article_text(soup: BeautifulSoup, url: str) -> str | None:
         for selector in (".content_view", ".post_article", ".post_content"):
             node = soup.select_one(selector)
             if node:
-                text = node.get_text(separator=" ", strip=True)
+                text = soup_to_article_text(node)
                 if len(text) >= 40:
                     return text
     if "bobaedream.co.kr" in host:
         for selector in (".bodyCont", "#print_area .bodyCont", ".content02"):
             node = soup.select_one(selector)
             if node:
-                text = node.get_text(separator=" ", strip=True)
+                text = soup_to_article_text(node)
                 if len(text) >= 40:
                     return text
     return None

@@ -1915,6 +1915,7 @@ class PersonalizedNewsService:
             importance=post.importance,
             summary=summary,
             summary_highlight=hit.highlight_summary if hit else None,
+            image_url=post.image_url,
             matched_keywords=matched,
             personalization_score=round(keyword_score + importance_score + source_score + freshness, 4),
         )

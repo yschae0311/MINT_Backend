@@ -63,6 +63,12 @@ def _migrate_pg_columns() -> None:
         )
         conn.execute(
             text(
+                f'ALTER TABLE "{_schema}".posts '
+                "ADD COLUMN IF NOT EXISTS image_url VARCHAR(512)"
+            )
+        )
+        conn.execute(
+            text(
                 f'ALTER TABLE "{_schema}".daily_reports '
                 "ADD COLUMN IF NOT EXISTS illustration_url VARCHAR(512)"
             )
@@ -290,6 +296,7 @@ def _migrate_sqlite_columns() -> None:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
         logger.info("Added %s.%s column (sqlite)", table, column)
 
+    _add_sqlite_col("posts", "image_url", "image_url VARCHAR(512)")
     _add_sqlite_col("news_categories", "edition_id", "edition_id CHAR(32)")
     _add_sqlite_col("keywords", "is_featured", "is_featured BOOLEAN NOT NULL DEFAULT 0")
     _add_sqlite_col("keywords", "edition_id", "edition_id CHAR(32)")

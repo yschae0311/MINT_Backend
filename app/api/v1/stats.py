@@ -65,6 +65,7 @@ def _post_preview(post: Post, db: Session, content=None) -> DashboardPostPreview
         collected_at=post.collected_at,
         original_url=content.original_url,
         ai_summary=ai_summary,
+        image_url=post.image_url,
     )
 
 

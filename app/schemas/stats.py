@@ -17,6 +17,7 @@ class DashboardPostPreview(BaseModel):
     collected_at: datetime
     original_url: str | None
     ai_summary: str | None = None
+    image_url: str | None = None
 
 
 class DashboardReportHighlight(BaseModel):

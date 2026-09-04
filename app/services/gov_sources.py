@@ -7,6 +7,8 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from app.services.article_text import soup_to_article_text
+
 _GOV_HOST_MARKERS = (
     "mcee.go.kr",
     "me.go.kr",
@@ -77,7 +79,7 @@ def extract_gov_article_text(soup: BeautifulSoup, url: str) -> str | None:
         ):
             node = soup.select_one(selector)
             if node:
-                text = node.get_text(separator=" ", strip=True)
+                text = soup_to_article_text(node)
                 if len(text) >= 80:
                     return text
 
@@ -91,7 +93,7 @@ def extract_gov_article_text(soup: BeautifulSoup, url: str) -> str | None:
         ):
             node = soup.select_one(selector)
             if node:
-                text = node.get_text(separator=" ", strip=True)
+                text = soup_to_article_text(node)
                 if len(text) >= 80:
                     return text
 
@@ -99,7 +101,7 @@ def extract_gov_article_text(soup: BeautifulSoup, url: str) -> str | None:
         for selector in (".board_view", ".view_cont", "#contents", ".content"):
             node = soup.select_one(selector)
             if node:
-                text = node.get_text(separator=" ", strip=True)
+                text = soup_to_article_text(node)
                 if len(text) >= 80:
                     return text
 

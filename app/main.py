@@ -22,6 +22,7 @@ media_root = Path(settings.media_root)
 media_root.mkdir(parents=True, exist_ok=True)
 (media_root / "reports").mkdir(parents=True, exist_ok=True)
 (media_root / "front").mkdir(parents=True, exist_ok=True)
+(media_root / "posts").mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager

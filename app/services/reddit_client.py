@@ -12,6 +12,7 @@ import feedparser
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.services.article_text import html_to_article_text
 from app.services.community_sources import (
     REDDIT_REQUEST_DELAY_SEC,
     REDDIT_USER_AGENT,
@@ -261,9 +262,7 @@ def reddit_post_from_raw(data: dict) -> tuple[str, str, str, datetime | None]:
     permalink = data.get("permalink") or ""
     post_url = reddit_post_url(permalink) if permalink else (data.get("url") or "").strip()
     if data.get("_from_rss"):
-        from bs4 import BeautifulSoup
-
-        selftext = BeautifulSoup(data.get("selftext") or "", "html.parser").get_text(" ", strip=True)
+        selftext = html_to_article_text(data.get("selftext") or "")
     else:
         selftext = (data.get("selftext") or "").strip()
     published = None

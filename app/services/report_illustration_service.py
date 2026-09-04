@@ -38,6 +38,16 @@ _SIMPLE_SCENE = (
 )
 
 
+def _image_ext(image_bytes: bytes) -> str:
+    if image_bytes.startswith(b"\xff\xd8"):
+        return "jpg"
+    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+        return "gif"
+    if image_bytes.startswith(b"RIFF") and b"WEBP" in image_bytes[:16]:
+        return "webp"
+    return "png"
+
+
 class ReportIllustrationService:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -260,6 +270,21 @@ class ReportIllustrationService:
         url = f"{self.settings.media_url_prefix.rstrip('/')}/reports/{report_id}.png"
         logger.info(
             "Saved report illustration path=%s bytes=%s url=%s",
+            path.resolve(),
+            len(image_bytes),
+            url,
+        )
+        return url
+
+    def save_for_post(self, post_id: UUID, image_bytes: bytes) -> str:
+        ext = _image_ext(image_bytes)
+        folder = self.media_root / "posts"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{post_id}.{ext}"
+        path.write_bytes(image_bytes)
+        url = f"{self.settings.media_url_prefix.rstrip('/')}/posts/{post_id}.{ext}"
+        logger.info(
+            "Saved story photo path=%s bytes=%s url=%s",
             path.resolve(),
             len(image_bytes),
             url,

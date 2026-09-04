@@ -621,7 +621,13 @@ def generate_daily_report_task(report_date: str | None = None):
             except Exception as exc:
                 logger.warning("generate_daily_report org=%s date=%s failed: %s", org.id, target, exc)
                 jobs.fail_job(job.id, str(exc))
-                continue
+            try:
+                from app.services.story_photo_service import StoryPhotoService
+
+                filled = StoryPhotoService(db).ensure_ranked_photos(org.id, report_date=target)
+                logger.info("ranked story photos org=%s filled=%s", org.id, filled)
+            except Exception as exc:
+                logger.warning("ranked story photos org=%s failed: %s", org.id, exc)
             recent = db.scalars(select(Post).where(Post.organization_id == org.id).limit(20)).all()
             for post in recent:
                 if not post.ai_outputs:

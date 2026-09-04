@@ -51,6 +51,7 @@ class PostRead(ORMBase):
     published_at: datetime | None
     collected_at: datetime
     raw_content: str
+    image_url: str | None = None
     category: str | None
     status: PostStatus
     trust_level: TrustLevel
@@ -71,6 +72,10 @@ class PostDetail(PostRead):
 
 class EmbedCheckResponse(BaseModel):
     embeddable: bool
+
+
+class StoryPhotoResponse(BaseModel):
+    image_url: str
 
 
 class PostListParams(BaseModel):

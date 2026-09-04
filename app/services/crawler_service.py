@@ -36,6 +36,7 @@ from app.services.gov_sources import (
     extract_gov_article_text,
     is_gov_notice_host,
 )
+from app.services.article_text import html_to_article_text, normalize_article_text, soup_to_article_text
 from app.services.ev_relevance import ai_reject_reason, passes_ai_evaluation, passes_keyword_gate
 from app.services.llm_client import get_llm_client
 from app.services.post_dedup import compute_content_hash, find_existing_post
@@ -318,7 +319,7 @@ class CrawlerService:
                 "form.usertext div.usertext-body"
             )
             if body:
-                return body.get_text(" ", strip=True)
+                return soup_to_article_text(body)
         except Exception as exc:
             logger.debug("Reddit post fetch failed for %s: %s", post_url, exc)
         return ""
@@ -422,8 +423,9 @@ class CrawlerService:
             resp = self._fetch_url(source.url)
             soup = BeautifulSoup(resp.text, "html.parser")
         title = soup.title.string.strip() if soup.title and soup.title.string else source.name
-        content = self._extract_main_text(soup, source.source_type)
-        content = re.sub(r"\s+", " ", content).strip()[:BODY_MAX_CHARS]
+        content = normalize_article_text(
+            self._extract_main_text(soup, source.source_type), max_chars=BODY_MAX_CHARS
+        )
         outcome, reason = self._process_discovery_candidate(source, title, source.url, content, None, stats)
         if outcome == "skipped":
             stats.add(reason or "other")
@@ -440,7 +442,7 @@ class CrawlerService:
             text = extract_gov_article_text(soup, url)
         if not text:
             text = self._extract_main_text(soup, source_type)
-        return re.sub(r"\s+", " ", text).strip()[:BODY_MAX_CHARS]
+        return normalize_article_text(text, max_chars=BODY_MAX_CHARS)
 
     def _extract_article_links(self, soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:
         if is_gov_notice_host(base_url):
@@ -762,8 +764,9 @@ class CrawlerService:
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "noscript"]):
             tag.decompose()
 
-        content = self._extract_main_text(soup, source.source_type)
-        content = re.sub(r"\s+", " ", content).strip()[:BODY_MAX_CHARS]
+        content = normalize_article_text(
+            self._extract_main_text(soup, source.source_type), max_chars=BODY_MAX_CHARS
+        )
         created = (
             1
             if self._save_post(
@@ -782,12 +785,9 @@ class CrawlerService:
         return created, skipped
 
     def _strip_html(self, text: str) -> str:
-        if "<" not in text:
-            return text
         try:
-            return BeautifulSoup(text, "html.parser").get_text(separator=" ", strip=True)
+            return html_to_article_text(text, max_chars=BODY_MAX_CHARS)
         except Exception:
-            # worst case: keep original text
             return text
 
     def _extract_main_text(self, soup: BeautifulSoup, source_type: SourceType) -> str:
@@ -803,7 +803,7 @@ class CrawlerService:
 
         if not container:
             return ""
-        return container.get_text(separator=" ", strip=True)
+        return soup_to_article_text(container)
 
     def _save_post(
         self,

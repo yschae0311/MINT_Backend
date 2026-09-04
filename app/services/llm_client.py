@@ -68,6 +68,10 @@ class LLMClient(ABC):
         ...
 
     @abstractmethod
+    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+        ...
+
+    @abstractmethod
     def answer_question(self, question: str, context: str) -> str:
         ...
 
@@ -254,6 +258,18 @@ class BedrockClient(LLMClient):
             raise BadRequestError("Bedrock returned empty illustration scene")
         return scene[:500]
 
+    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+        system = _load_prompt("story_illustration_v1.md")
+        user = json.dumps(
+            {"title": (title or "")[:180], "summary": (summary or "")[:500]},
+            ensure_ascii=False,
+        )
+        result = _parse_json(self._generate(self.report_model, system, user, json_mode=True))
+        scene = (result.get("scene") or "").strip()
+        if not scene:
+            raise BadRequestError("Bedrock returned empty story illustration scene")
+        return scene[:500]
+
     def answer_question(self, question: str, context: str) -> str:
         system = _load_prompt("chat_assistant_v1.md")
         user = f"[참고 자료]\n{context[:14000]}\n\n[질문]\n{question}"
@@ -409,6 +425,18 @@ class GeminiClient(LLMClient):
             raise BadRequestError("Gemini returned empty illustration scene")
         return scene[:500]
 
+    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+        system = _load_prompt("story_illustration_v1.md")
+        user = json.dumps(
+            {"title": (title or "")[:180], "summary": (summary or "")[:500]},
+            ensure_ascii=False,
+        )
+        result = _parse_json(self._generate(self.report_model, system, user, json_mode=True))
+        scene = (result.get("scene") or "").strip()
+        if not scene:
+            raise BadRequestError("Gemini returned empty story illustration scene")
+        return scene[:500]
+
     def answer_question(self, question: str, context: str) -> str:
         system = _load_prompt("chat_assistant_v1.md")
         user = f"[참고 자료]\n{context[:14000]}\n\n[질문]\n{question}"
@@ -547,6 +575,12 @@ class MockLLMClient(LLMClient):
         return (
             f"Electric vehicle charging stations and power grid lines under a calm sky, "
             f"symbolizing industry news on {report_date.isoformat()}: {topic[:60]}"
+        )
+
+    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+        return (
+            f"Black and white newspaper sketch of this specific story: {title[:80]}. "
+            f"{(summary or '')[:120]}"
         )
 
     def classify_chat_question(self, question: str) -> dict:

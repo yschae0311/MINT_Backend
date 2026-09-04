@@ -26,6 +26,7 @@ class Post(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     raw_content: Mapped[str] = mapped_column(Text, default="")
+    image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     keywords: Mapped[dict | None] = mapped_column(JSON, nullable=True)
