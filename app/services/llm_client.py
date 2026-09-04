@@ -15,6 +15,17 @@ def _load_prompt(name: str) -> str:
     return (PROMPTS_DIR / name).read_text(encoding="utf-8")
 
 
+def _story_scene_user(title: str, summary: str, body: str = "") -> str:
+    return json.dumps(
+        {
+            "title": (title or "")[:220],
+            "summary": (summary or "")[:800],
+            "body": (body or "")[:1500],
+        },
+        ensure_ascii=False,
+    )
+
+
 def _parse_json(text: str) -> dict:
     text = (text or "").strip()
     if not text:
@@ -68,7 +79,9 @@ class LLMClient(ABC):
         ...
 
     @abstractmethod
-    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+    def generate_story_illustration_scene(
+        self, title: str, summary: str, *, body: str = ""
+    ) -> str:
         ...
 
     @abstractmethod
@@ -258,17 +271,17 @@ class BedrockClient(LLMClient):
             raise BadRequestError("Bedrock returned empty illustration scene")
         return scene[:500]
 
-    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+    def generate_story_illustration_scene(
+        self, title: str, summary: str, *, body: str = ""
+    ) -> str:
         system = _load_prompt("story_illustration_v1.md")
-        user = json.dumps(
-            {"title": (title or "")[:180], "summary": (summary or "")[:500]},
-            ensure_ascii=False,
+        result = _parse_json(
+            self._generate(self.report_model, system, _story_scene_user(title, summary, body), json_mode=True)
         )
-        result = _parse_json(self._generate(self.report_model, system, user, json_mode=True))
         scene = (result.get("scene") or "").strip()
         if not scene:
             raise BadRequestError("Bedrock returned empty story illustration scene")
-        return scene[:500]
+        return scene[:700]
 
     def answer_question(self, question: str, context: str) -> str:
         system = _load_prompt("chat_assistant_v1.md")
@@ -425,17 +438,17 @@ class GeminiClient(LLMClient):
             raise BadRequestError("Gemini returned empty illustration scene")
         return scene[:500]
 
-    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+    def generate_story_illustration_scene(
+        self, title: str, summary: str, *, body: str = ""
+    ) -> str:
         system = _load_prompt("story_illustration_v1.md")
-        user = json.dumps(
-            {"title": (title or "")[:180], "summary": (summary or "")[:500]},
-            ensure_ascii=False,
+        result = _parse_json(
+            self._generate(self.report_model, system, _story_scene_user(title, summary, body), json_mode=True)
         )
-        result = _parse_json(self._generate(self.report_model, system, user, json_mode=True))
         scene = (result.get("scene") or "").strip()
         if not scene:
             raise BadRequestError("Gemini returned empty story illustration scene")
-        return scene[:500]
+        return scene[:700]
 
     def answer_question(self, question: str, context: str) -> str:
         system = _load_prompt("chat_assistant_v1.md")
@@ -577,10 +590,13 @@ class MockLLMClient(LLMClient):
             f"symbolizing industry news on {report_date.isoformat()}: {topic[:60]}"
         )
 
-    def generate_story_illustration_scene(self, title: str, summary: str) -> str:
+    def generate_story_illustration_scene(
+        self, title: str, summary: str, *, body: str = ""
+    ) -> str:
+        facts = " ".join(part for part in (title, summary, body) if (part or "").strip())
         return (
-            f"Black and white newspaper sketch of this specific story: {title[:80]}. "
-            f"{(summary or '')[:120]}"
+            f"Literal newspaper sketch of this headline and facts: {facts[:280]}. "
+            "Show the concrete objects and setting, not a generic charging plaza."
         )
 
     def classify_chat_question(self, question: str) -> dict:

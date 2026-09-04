@@ -34,6 +34,20 @@ _MAX_IMAGE_BYTES = 4_000_000
 _MIN_IMAGE_BYTES = 8_000
 
 
+def _fallback_story_scene(title: str, summary: str, body: str) -> str:
+    facts = " ".join(
+        part
+        for part in ((title or "").strip(), (summary or "").strip(), (body or "").strip()[:280])
+        if part
+    )
+    return (
+        "Literal black-and-white news sketch of this exact headline and facts, "
+        "showing the concrete objects, vehicles, places, and event described — "
+        "not a generic charging station or power grid: "
+        f"{facts[:420]}"
+    )
+
+
 class StoryPhotoService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -201,12 +215,16 @@ class StoryPhotoService:
             return None
         content = get_post_content(self.db, post.id)
         summary = (content.summary or "").strip()
-        scene = post.title
+        body = (content.body or post.raw_content or "").strip()
         try:
-            scene = get_llm_client().generate_story_illustration_scene(post.title, summary)
+            scene = get_llm_client().generate_story_illustration_scene(
+                post.title, summary, body=body
+            )
         except Exception as exc:
-            logger.debug("Story photo scene fallback post=%s: %s", post.id, exc)
-        image_bytes = self.illus.generate_image_bytes(scene)
+            logger.warning("Story photo scene fallback post=%s: %s", post.id, exc)
+            scene = _fallback_story_scene(post.title, summary, body)
+        logger.info("Story photo scene post=%s title=%s scene=%s", post.id, post.title[:80], scene[:240])
+        image_bytes = self.illus.generate_image_bytes(scene, story=True)
         if not image_bytes:
             return None
         return self.illus.save_for_post(post.id, image_bytes)

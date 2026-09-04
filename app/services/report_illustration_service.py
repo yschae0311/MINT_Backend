@@ -37,6 +37,31 @@ _SIMPLE_SCENE = (
     "editorial metaphor, empty of people"
 )
 
+_STORY_SKETCH_SUFFIX = (
+    " Draw only that news subject. Do not substitute a generic EV charging plaza, "
+    "power grid, empty parking lot, or charging cables unless the subject is literally "
+    "about chargers. Black and white newspaper pen-and-ink sketch, newsprint texture, "
+    "no color, no photorealism, no text, no logos, no readable signs, no human faces."
+)
+
+
+def candidate_image_scenes(scene: str, *, story: bool) -> list[str]:
+    primary = " ".join((scene or "").split())
+    if story:
+        return [primary] if primary else []
+    if primary:
+        return [primary, _SIMPLE_SCENE]
+    return [_SIMPLE_SCENE]
+
+
+def compose_story_image_prompt(scene: str, *, max_chars: int = 4000) -> str:
+    """Lead with the story subject so truncated image-model prompts keep the facts."""
+    subject = " ".join((scene or "").split())
+    if not subject:
+        return ""
+    budget = max(80, max_chars - len(_STORY_SKETCH_SUFFIX))
+    return f"{subject[:budget]}{_STORY_SKETCH_SUFFIX}"[:max_chars]
+
 
 def _image_ext(image_bytes: bytes) -> str:
     if image_bytes.startswith(b"\xff\xd8"):
@@ -65,14 +90,14 @@ class ReportIllustrationService:
             ordered = [primary, *[m for m in ordered if m != primary]]
         return ordered
 
-    def generate_image_bytes(self, scene: str) -> bytes | None:
+    def generate_image_bytes(self, scene: str, *, story: bool = False) -> bytes | None:
         if not self.settings.report_illustration_enabled:
             return None
         provider = self.settings.llm_provider.lower().strip()
         if provider == "bedrock":
-            return self._generate_bedrock_image(scene)
+            return self._generate_bedrock_image(scene, story=story)
         if provider == "gemini":
-            return self._generate_gemini_image(scene)
+            return self._generate_gemini_image(scene, story=story)
         return None
 
     def _bedrock_image_payloads(self, prompt: str) -> list[dict]:
@@ -102,7 +127,7 @@ class ReportIllustrationService:
             }
         ]
 
-    def _generate_bedrock_image(self, scene: str) -> bytes | None:
+    def _generate_bedrock_image(self, scene: str, *, story: bool = False) -> bytes | None:
         model_id = (self.settings.bedrock_image_model or "").strip()
         if not model_id:
             return None
@@ -115,7 +140,7 @@ class ReportIllustrationService:
             (self.settings.bedrock_image_region or "").strip()
             or (self.settings.aws_region or "").strip()
         )
-        scenes = [scene.strip(), _SIMPLE_SCENE]
+        scenes = candidate_image_scenes(scene, story=story)
         try:
             client = create_bedrock_runtime_client(self.settings, region=image_region)
         except Exception as exc:
@@ -125,7 +150,11 @@ class ReportIllustrationService:
         for attempt_scene in scenes:
             if not attempt_scene:
                 continue
-            prompt = f"{NEWSPAPER_SKETCH_PREFIX}{attempt_scene}"
+            prompt = (
+                compose_story_image_prompt(attempt_scene, max_chars=1024)
+                if story
+                else f"{NEWSPAPER_SKETCH_PREFIX}{attempt_scene}"
+            )
             for payload in self._bedrock_image_payloads(prompt):
                 try:
                     response = client.invoke_model(
@@ -157,12 +186,12 @@ class ReportIllustrationService:
 
         return None
 
-    def _generate_gemini_image(self, scene: str) -> bytes | None:
+    def _generate_gemini_image(self, scene: str, *, story: bool = False) -> bytes | None:
         api_key = self.settings.gemini_api_key.strip()
         if not api_key:
             return None
 
-        scenes = [scene.strip(), _SIMPLE_SCENE]
+        scenes = candidate_image_scenes(scene, story=story)
         payloads = [
             {
                 "generationConfig": {
@@ -185,7 +214,11 @@ class ReportIllustrationService:
         for attempt_scene in scenes:
             if not attempt_scene:
                 continue
-            prompt = f"{NEWSPAPER_SKETCH_PREFIX}{attempt_scene}"
+            prompt = (
+                compose_story_image_prompt(attempt_scene)
+                if story
+                else f"{NEWSPAPER_SKETCH_PREFIX}{attempt_scene}"
+            )
             for model in self._gemini_model_candidates():
                 for cfg in payloads:
                     payload = {
@@ -282,7 +315,10 @@ class ReportIllustrationService:
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{post_id}.{ext}"
         path.write_bytes(image_bytes)
-        url = f"{self.settings.media_url_prefix.rstrip('/')}/posts/{post_id}.{ext}"
+        url = (
+            f"{self.settings.media_url_prefix.rstrip('/')}"
+            f"/posts/{post_id}.{ext}?v={int(time.time())}"
+        )
         logger.info(
             "Saved story photo path=%s bytes=%s url=%s",
             path.resolve(),
