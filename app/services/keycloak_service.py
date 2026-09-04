@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -229,7 +230,6 @@ class KeycloakAuthService:
 
         roles = extract_roles(claims)
         is_superadmin = get_settings().keycloak_admin_role in roles
-        role = UserRole.admin if is_superadmin else UserRole.viewer
 
         if user is None:
             user = self.db.scalar(select(User).where(func.lower(User.email) == email))
@@ -250,7 +250,7 @@ class KeycloakAuthService:
                 password_hash=None,
                 name=name,
                 keycloak_sub=sub,
-                role=role,
+                role=UserRole.admin if is_superadmin else UserRole.viewer,
                 approval_status=AccountApprovalStatus.approved,
                 is_active=True,
             )
@@ -260,11 +260,13 @@ class KeycloakAuthService:
             user.email = email
             user.name = name
             user.keycloak_sub = sub
-            user.role = role
+            if is_superadmin:
+                user.role = UserRole.admin
             user.approval_status = AccountApprovalStatus.approved
 
         if not user.is_active:
             raise BadRequestError("Account is inactive")
+        user.last_login_at = datetime.now(timezone.utc)
         issued = AuthService(self.db)._issue_tokens(user)
         issued.id_token = id_token
         return issued

@@ -288,3 +288,32 @@ class MembershipService:
             )
         self.db.commit()
         return self.membership_reads(target)
+
+    def set_my_editions(self, user: User, edition_ids: list[UUID]) -> list[UserEditionMembership]:
+        if is_org_admin(user):
+            raise BadRequestError("총관은 분야를 고르지 않아도 모든 지면을 볼 수 있습니다.")
+        unique = list(dict.fromkeys(edition_ids))
+        if not unique:
+            raise BadRequestError("분야를 하나 이상 선택해 주세요.")
+        catalog = {
+            row.id: row
+            for row in self.db.scalars(
+                select(Edition).where(
+                    Edition.organization_id == user.organization_id,
+                    Edition.is_active.is_(True),
+                    Edition.id.in_(unique),
+                )
+            ).all()
+        }
+        if len(catalog) != len(unique):
+            raise BadRequestError("선택할 수 없는 분야가 포함되어 있습니다.")
+        editor_ids = {
+            row.edition_id for row in self.membership_rows(user.id) if row.is_editor
+        }
+        merged = list(dict.fromkeys([*unique, *editor_ids]))
+        assignments = [
+            UserEditionAssignment(edition_id=edition_id, is_editor=edition_id in editor_ids)
+            for edition_id in merged
+        ]
+        return self.set_user_editions(user, assignments)
+

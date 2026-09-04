@@ -125,6 +125,57 @@ class MembershipServiceTest(unittest.TestCase):
         self.assertEqual(read.editions[0].slug, AUTONOMOUS_SLUG)
         self.assertTrue(read.editions[0].is_editor)
 
+    def test_member_can_choose_own_editions(self) -> None:
+        from sqlalchemy import select
+
+        av = self.editions[AUTONOMOUS_SLUG]
+        ev = self.editions[EV_SLUG]
+        self.membership.set_my_editions(self.member, [av.id, ev.id])
+        visible = self.membership.visible_edition_ids(self.member)
+        self.assertEqual(visible, {av.id, ev.id})
+        rows = list(self.db.scalars(select(UserEdition).where(UserEdition.user_id == self.member.id)).all())
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(not row.is_editor for row in rows))
+
+    def test_self_serve_cannot_grant_editor(self) -> None:
+        av = self.editions[AUTONOMOUS_SLUG]
+        self.membership.set_my_editions(self.member, [av.id])
+        read = self.membership.to_user_read(self.member)
+        self.assertEqual(len(read.editions), 1)
+        self.assertFalse(read.editions[0].is_editor)
+
+    def test_self_serve_keeps_existing_editor_desk(self) -> None:
+        av = self.editions[AUTONOMOUS_SLUG]
+        ev = self.editions[EV_SLUG]
+        self.membership.set_user_editions(
+            self.member,
+            [UserEditionAssignment(edition_id=av.id, is_editor=True)],
+        )
+        self.membership.set_my_editions(self.member, [ev.id])
+        read = {item.id: item for item in self.membership.to_user_read(self.member).editions}
+        self.assertTrue(read[av.id].is_editor)
+        self.assertFalse(read[ev.id].is_editor)
+
+    def test_self_serve_rejects_empty_and_unknown(self) -> None:
+        from app.core.exceptions import BadRequestError
+        from uuid import uuid4
+
+        with self.assertRaises(BadRequestError):
+            self.membership.set_my_editions(self.member, [])
+        with self.assertRaises(BadRequestError):
+            self.membership.set_my_editions(self.member, [uuid4()])
+        with self.assertRaises(BadRequestError):
+            self.membership.set_my_editions(self.admin, [self.editions[EV_SLUG].id])
+
+    def test_unassigned_member_catalog_is_still_visible(self) -> None:
+        self.assertEqual(self.membership.visible_edition_ids(self.member), set())
+        catalog = EditionService(self.db).list_reads(self.org_id, active_only=True)
+        self.assertGreaterEqual(len(catalog), 2)
+        slugs = {row.slug for row in catalog}
+        self.assertIn(EV_SLUG, slugs)
+        self.assertIn(AUTONOMOUS_SLUG, slugs)
+
+
 
 if __name__ == "__main__":
     unittest.main()

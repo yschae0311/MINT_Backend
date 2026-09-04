@@ -23,7 +23,7 @@ from app.services.crawl_skip_stats import CrawlSkipStats
 from app.services.crawler_service import CrawlerService
 from app.services.job_service import JobService
 from app.services.post_service import PostService
-from app.services.personalization_service import ClassificationService, PersonalReportService
+from app.services.personalization_service import ClassificationService, PersonalReportService, ReviewQueueService
 from app.services.report_service import ReportService
 from app.services.slack_service import SlackService
 from app.workers.celery_app import celery_app
@@ -482,15 +482,7 @@ def classify_posts_job_task(job_id: str, organization_id: str, limit: int = 500)
         jobs.start_job(UUID(job_id))
         if jobs.is_cancelled(UUID(job_id)):
             return
-        q = (
-            select(Post)
-            .options(joinedload(Post.ai_outputs))
-            .where(
-                Post.organization_id == UUID(organization_id),
-                Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
-            )
-        )
-        posts = list(db.scalars(q.order_by(Post.collected_at.desc()).limit(limit)).unique().all())
+        posts = ReviewQueueService(db).pending_posts_for_reclassify(UUID(organization_id), limit)
         total = len(posts)
         jobs.update_progress(UUID(job_id), 0, max(total, 1), f"0 / {total} 분류 중…")
         ok = 0

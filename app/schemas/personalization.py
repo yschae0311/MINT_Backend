@@ -75,7 +75,7 @@ class KeywordMergeRequest(BaseModel):
 
 
 class KeywordSubscriptionUpdate(BaseModel):
-    keyword_ids: list[UUID] = Field(min_length=1, max_length=30)
+    keyword_ids: list[UUID] = Field(default_factory=list, max_length=30)
 
 
 class MatchedKeyword(BaseModel):

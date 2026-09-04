@@ -221,6 +221,12 @@ def _migrate_pg_columns() -> None:
         )
         conn.execute(
             text(
+                f'ALTER TABLE "{_schema}".users '
+                "ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ"
+            )
+        )
+        conn.execute(
+            text(
                 f"""
                 CREATE TABLE IF NOT EXISTS "{_schema}".user_editions (
                     id UUID PRIMARY KEY,
@@ -289,6 +295,7 @@ def _migrate_sqlite_columns() -> None:
     _add_sqlite_col("keywords", "edition_id", "edition_id CHAR(32)")
     _add_sqlite_col("daily_reports", "edition_id", "edition_id CHAR(32)")
     _add_sqlite_col("users", "keycloak_sub", "keycloak_sub VARCHAR(128)")
+    _add_sqlite_col("users", "last_login_at", "last_login_at DATETIME")
 
 
 def init_db() -> None:

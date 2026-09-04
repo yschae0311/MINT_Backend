@@ -16,6 +16,19 @@ from app.services.personalization_service import TaxonomyService
 router = APIRouter()
 
 
+@router.get("/available", response_model=list[EditionRead])
+def list_available_editions(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Active desks in the org, not filtered by the caller's membership."""
+    service = EditionService(db)
+    TaxonomyService(db).ensure_defaults(user.organization_id)
+    rows = service.list_reads(user.organization_id, active_only=True)
+    db.commit()
+    return rows
+
+
 @router.get("", response_model=list[EditionRead])
 def list_editions(
     active_only: bool = Query(default=True),

@@ -69,6 +69,7 @@ class AuthService:
             raise BadRequestError("Account registration rejected")
         if not user.is_active:
             raise BadRequestError("Account is inactive")
+        user.last_login_at = datetime.now(timezone.utc)
         return self._issue_tokens(user)
 
     def refresh(self, raw_refresh_token: str) -> TokenResponse:

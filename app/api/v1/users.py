@@ -27,7 +27,7 @@ def update_user_role(
     user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return UserService(db).update_role(user_id, user.organization_id, data)
+    return UserService(db).update_role(user_id, user.organization_id, data, actor=user)
 
 
 @router.patch("/{user_id}/active", response_model=UserAdminRead)
@@ -37,7 +37,7 @@ def update_user_active(
     user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return UserService(db).set_active(user_id, user.organization_id, data.is_active)
+    return UserService(db).set_active(user_id, user.organization_id, data.is_active, actor=user)
 
 
 @router.put("/{user_id}/editions", response_model=UserAdminRead)

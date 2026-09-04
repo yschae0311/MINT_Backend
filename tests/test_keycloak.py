@@ -70,8 +70,9 @@ class KeycloakLoginTest(unittest.TestCase):
         self.assertEqual(user.role, UserRole.viewer)
         self.assertEqual(user.approval_status, AccountApprovalStatus.approved)
         self.assertTrue(user.is_active)
+        self.assertIsNotNone(user.last_login_at)
 
-    def test_second_login_updates_profile_and_admin_role(self) -> None:
+    def test_second_login_updates_profile_and_keeps_mint_admin(self) -> None:
         org = self.db.scalar(select(Organization))
         assert org is not None
         existing = User(
@@ -98,7 +99,35 @@ class KeycloakLoginTest(unittest.TestCase):
         self.db.refresh(existing)
         self.assertEqual(existing.email, "newmail@example.com")
         self.assertEqual(existing.name, "갱신")
-        self.assertEqual(existing.role, UserRole.viewer)
+        self.assertEqual(existing.role, UserRole.admin)
+        self.assertIsNotNone(existing.last_login_at)
+
+    def test_keycloak_admin_role_promotes_existing_viewer(self) -> None:
+        org = self.db.scalar(select(Organization))
+        assert org is not None
+        existing = User(
+            organization_id=org.id,
+            email="member@example.com",
+            password_hash="x",
+            name="멤버",
+            keycloak_sub="kc-3",
+            role=UserRole.viewer,
+            approval_status=AccountApprovalStatus.approved,
+            is_active=True,
+        )
+        self.db.add(existing)
+        self.db.commit()
+        claims = {
+            "sub": "kc-3",
+            "email": "member@example.com",
+            "name": "멤버",
+            "azp": "mint",
+            "realm_access": {"roles": ["mint-superadmin"]},
+        }
+        with patch("app.services.keycloak_service.verify_access_token", return_value=claims):
+            KeycloakAuthService(self.db).login(access_token="fake")
+        self.db.refresh(existing)
+        self.assertEqual(existing.role, UserRole.admin)
 
     def test_links_seed_admin_by_email(self) -> None:
         org = self.db.scalar(select(Organization))

@@ -16,6 +16,7 @@ class UserAdminRead(ORMBase):
     role: UserRole
     approval_status: AccountApprovalStatus
     is_active: bool
+    last_login_at: datetime | None = None
     created_at: datetime
     editions: list[UserEditionMembership] = Field(default_factory=list)
 
@@ -35,3 +36,8 @@ class UserEditionsUpdate(BaseModel):
 
 class UserActiveUpdate(BaseModel):
     is_active: bool
+
+
+class MyEditionsUpdate(BaseModel):
+    edition_ids: list[UUID] = Field(min_length=1, max_length=20)
+

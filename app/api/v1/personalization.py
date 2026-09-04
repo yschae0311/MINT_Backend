@@ -312,9 +312,7 @@ def update_my_keywords(
 ):
     _require_personalization_enabled()
     service = TaxonomyService(db)
-    # Category-first ready gate: keyword-only users still need ≥3; with categories, ≥1 is enough.
-    minimum = 1 if service.selected_category_ids(user.id) else 3
-    rows = service.set_subscriptions(user, data.keyword_ids, minimum=minimum)
+    rows = service.set_subscriptions(user, data.keyword_ids, minimum=0)
     selected = {row.id for row in rows}
     return [_keyword_read(row, selected) for row in rows]
 
@@ -552,7 +550,7 @@ def reclassify_all_posts(
     job = jobs.create_job(
         user.organization_id,
         JobType.classify_posts,
-        "뉴스 전체 재분류",
+        "검수함 재분류",
         triggered_by=user.id,
     )
     db.commit()

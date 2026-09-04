@@ -23,7 +23,7 @@ class EditionRead(ORMBase):
 
 class EditionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
-    slug: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    slug: str | None = Field(default=None, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     topic_terms: list[str] = Field(default_factory=list, max_length=40)
     sort_order: int | None = None
     is_active: bool = True

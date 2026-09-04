@@ -46,10 +46,16 @@ DEFAULT_EDITIONS = (
 
 
 def slugify_edition(value: str) -> str:
-    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in (value or "").strip())
+    parts: list[str] = []
+    for ch in (value or "").strip().lower():
+        if "a" <= ch <= "z" or "0" <= ch <= "9":
+            parts.append(ch)
+        else:
+            parts.append("-")
+    cleaned = "".join(parts)
     while "--" in cleaned:
         cleaned = cleaned.replace("--", "-")
-    return (cleaned.strip("-") or "edition")[:64]
+    return (cleaned.strip("-") or "desk")[:64]
 
 
 class EditionService:
@@ -108,16 +114,36 @@ class EditionService:
             )
         )
 
-    def create(self, organization_id: UUID, data: EditionCreate) -> Edition:
-        slug = data.slug.strip().lower()
-        exists = self.db.scalar(
-            select(Edition).where(
-                Edition.organization_id == organization_id,
-                Edition.slug == slug,
+    def allocate_slug(self, organization_id: UUID, name: str, requested: str | None) -> str:
+        requested = (requested or "").strip().lower()
+        if requested:
+            exists = self.db.scalar(
+                select(Edition.id).where(
+                    Edition.organization_id == organization_id,
+                    Edition.slug == requested,
+                )
             )
-        )
-        if exists:
-            raise BadRequestError("같은 슬러그의 분야가 이미 있습니다.")
+            if exists:
+                raise BadRequestError("같은 슬러그의 분야가 이미 있습니다.")
+            return requested
+        base = slugify_edition(name)
+        candidate = base
+        n = 2
+        while self.db.scalar(
+            select(Edition.id).where(
+                Edition.organization_id == organization_id,
+                Edition.slug == candidate,
+            )
+        ):
+            suffix = f"-{n}"
+            candidate = f"{base[: 64 - len(suffix)]}{suffix}"
+            n += 1
+            if n > 80:
+                raise BadRequestError("분야 식별자를 만들지 못했습니다. 이름을 바꿔 주세요.")
+        return candidate
+
+    def create(self, organization_id: UUID, data: EditionCreate) -> Edition:
+        slug = self.allocate_slug(organization_id, data.name, data.slug)
         max_order = self.db.scalar(
             select(func.max(Edition.sort_order)).where(Edition.organization_id == organization_id)
         )

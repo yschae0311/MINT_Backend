@@ -770,7 +770,7 @@ class TaxonomyService:
         user: User,
         keyword_ids: list[UUID],
         *,
-        minimum: int = 3,
+        minimum: int = 0,
         replace_existing: bool = True,
     ) -> list[Keyword]:
         unique_ids = list(dict.fromkeys(keyword_ids))
@@ -778,23 +778,25 @@ class TaxonomyService:
             raise BadRequestError(
                 f"관심 키워드는 최소 {minimum}개를 선택해야 합니다."
             )
-        allowed = list(
-            self.db.scalars(
-                select(Keyword).where(
-                    Keyword.id.in_(unique_ids),
-                    Keyword.organization_id == user.organization_id,
-                    Keyword.status.in_(
-                        [KeywordStatus.active, KeywordStatus.candidate]
-                    ),
-                    or_(
-                        Keyword.scope == KeywordScope.organization,
-                        Keyword.owner_user_id == user.id,
-                    ),
-                )
-            ).all()
-        )
-        if len(allowed) != len(unique_ids):
-            raise BadRequestError("선택할 수 없는 키워드가 포함되어 있습니다.")
+        allowed: list[Keyword] = []
+        if unique_ids:
+            allowed = list(
+                self.db.scalars(
+                    select(Keyword).where(
+                        Keyword.id.in_(unique_ids),
+                        Keyword.organization_id == user.organization_id,
+                        Keyword.status.in_(
+                            [KeywordStatus.active, KeywordStatus.candidate]
+                        ),
+                        or_(
+                            Keyword.scope == KeywordScope.organization,
+                            Keyword.owner_user_id == user.id,
+                        ),
+                    )
+                ).all()
+            )
+            if len(allowed) != len(unique_ids):
+                raise BadRequestError("선택할 수 없는 키워드가 포함되어 있습니다.")
         if replace_existing:
             self.db.execute(
                 delete(UserKeywordSubscription).where(
@@ -2264,6 +2266,31 @@ class ReviewQueueService:
                 or 0
             )
         return len(self.list(organization_id, ReviewQueueStatus.pending, user=user))
+
+    def pending_posts_for_reclassify(self, organization_id: UUID, limit: int) -> list[Post]:
+        pending_post_ids = (
+            select(ReviewQueueItem.post_id)
+            .where(
+                ReviewQueueItem.organization_id == organization_id,
+                ReviewQueueItem.status == ReviewQueueStatus.pending,
+            )
+            .distinct()
+        )
+        return list(
+            self.db.scalars(
+                select(Post)
+                .options(joinedload(Post.ai_outputs))
+                .where(
+                    Post.organization_id == organization_id,
+                    Post.status.not_in([PostStatus.deleted, PostStatus.hidden]),
+                    Post.id.in_(pending_post_ids),
+                )
+                .order_by(Post.collected_at.desc())
+                .limit(limit)
+            )
+            .unique()
+            .all()
+        )
 
     def resolve(
         self,

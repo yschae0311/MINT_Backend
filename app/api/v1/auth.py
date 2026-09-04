@@ -12,6 +12,7 @@ from app.schemas.auth import (
     TokenResponse,
     UserRead,
 )
+from app.schemas.user import MyEditionsUpdate
 from app.services.auth_service import AuthService
 from app.services.keycloak_service import KeycloakAuthService, oidc_config
 from app.services.membership_service import MembershipService
@@ -41,6 +42,16 @@ def refresh(data: RefreshRequest, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=UserRead)
 def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return MembershipService(db).to_user_read(user)
+
+
+@router.put("/me/editions", response_model=UserRead)
+def set_my_editions(
+    data: MyEditionsUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    MembershipService(db).set_my_editions(user, data.edition_ids)
     return MembershipService(db).to_user_read(user)
 
 

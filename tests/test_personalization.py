@@ -79,8 +79,10 @@ class PersonalizationServiceTest(unittest.TestCase):
 
     def test_requires_at_least_three_keywords(self) -> None:
         keywords = self.taxonomy.list_keywords(self.user)
-        with self.assertRaises(Exception):
-            self.taxonomy.set_subscriptions(self.user, [keywords[0].id, keywords[1].id])
+        chosen = self.taxonomy.set_subscriptions(self.user, [keywords[0].id])
+        self.assertEqual(len(chosen), 1)
+        emptied = self.taxonomy.set_subscriptions(self.user, [])
+        self.assertEqual(emptied, [])
 
     def test_post_is_deduplicated_in_personal_feed(self) -> None:
         keywords = self.taxonomy.list_keywords(self.user)
@@ -246,6 +248,43 @@ class PersonalizationServiceTest(unittest.TestCase):
         service = ReviewQueueService(self.db)
         self.assertEqual(service.pending_count(self.user.organization_id), 1)
         self.assertEqual(len(service.list(self.user.organization_id, ReviewQueueStatus.pending)), 1)
+
+    def test_pending_posts_for_reclassify_skips_posts_not_in_queue(self) -> None:
+        queued = self._post()
+        self._post(1)
+        resolved = self._post(2)
+        hidden = self._post(3)
+        hidden.status = PostStatus.hidden
+        self.db.add(
+            ReviewQueueItem(
+                organization_id=self.user.organization_id,
+                post_id=queued.id,
+                reason=ReviewQueueReason.no_keywords,
+                status=ReviewQueueStatus.pending,
+            )
+        )
+        self.db.add(
+            ReviewQueueItem(
+                organization_id=self.user.organization_id,
+                post_id=resolved.id,
+                reason=ReviewQueueReason.no_keywords,
+                status=ReviewQueueStatus.resolved,
+            )
+        )
+        self.db.add(
+            ReviewQueueItem(
+                organization_id=self.user.organization_id,
+                post_id=hidden.id,
+                reason=ReviewQueueReason.no_keywords,
+                status=ReviewQueueStatus.pending,
+            )
+        )
+        self.db.commit()
+        posts = ReviewQueueService(self.db).pending_posts_for_reclassify(
+            self.user.organization_id,
+            limit=500,
+        )
+        self.assertEqual([post.id for post in posts], [queued.id])
 
     def test_classify_creates_selectable_new_keyword(self) -> None:
         post = self._post()

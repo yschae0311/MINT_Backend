@@ -27,8 +27,17 @@ class UserService:
             raise NotFoundError("User not found")
         return user
 
-    def update_role(self, user_id: UUID, organization_id: UUID, data: UserRoleUpdate) -> UserAdminRead:
+    def update_role(
+        self,
+        user_id: UUID,
+        organization_id: UUID,
+        data: UserRoleUpdate,
+        *,
+        actor: User,
+    ) -> UserAdminRead:
         user = self._get_org_user(user_id, organization_id)
+        if actor.id == user.id and data.role != UserRole.admin:
+            raise BadRequestError("자신의 총관 권한은 해제할 수 없습니다.")
         if user.role == UserRole.admin and data.role != UserRole.admin:
             self._ensure_other_admin(organization_id, user_id)
         user.role = data.role
@@ -36,8 +45,17 @@ class UserService:
         self.db.refresh(user)
         return MembershipService(self.db).to_admin_read(user)
 
-    def set_active(self, user_id: UUID, organization_id: UUID, is_active: bool) -> UserAdminRead:
+    def set_active(
+        self,
+        user_id: UUID,
+        organization_id: UUID,
+        is_active: bool,
+        *,
+        actor: User,
+    ) -> UserAdminRead:
         user = self._get_org_user(user_id, organization_id)
+        if actor.id == user.id and not is_active:
+            raise BadRequestError("자신의 계정은 비활성화할 수 없습니다.")
         if user.role == UserRole.admin and not is_active:
             self._ensure_other_admin(organization_id, user_id)
         user.is_active = is_active
@@ -67,4 +85,4 @@ class UserService:
             )
         )
         if not other_admins:
-            raise BadRequestError("Cannot remove the last admin")
+            raise BadRequestError("마지막 총관은 해제할 수 없습니다.")

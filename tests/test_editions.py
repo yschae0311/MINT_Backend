@@ -166,6 +166,16 @@ class EditionsServiceTest(unittest.TestCase):
         self.assertIn("hydrogen", slugs)
         self.assertIn(EV_SLUG, slugs)
 
+    def test_create_edition_slug_from_korean_name(self) -> None:
+        from app.services.edition_service import slugify_edition
+
+        self.assertEqual(slugify_edition("Hydrogen Fuel"), "hydrogen-fuel")
+        self.assertEqual(slugify_edition("수소"), "desk")
+        row = self.editions.create(self.org_id, EditionCreate(name="수소", topic_terms=["수소차"]))
+        self.assertEqual(row.slug, "desk")
+        again = self.editions.create(self.org_id, EditionCreate(name="배터리"))
+        self.assertEqual(again.slug, "desk-2")
+
     def test_missing_sources_when_no_tagged_or_general_source(self) -> None:
         reads = self.editions.list_reads(self.org_id, active_only=True)
         self.assertTrue(all(item.missing_sources for item in reads))
